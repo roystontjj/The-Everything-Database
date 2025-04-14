@@ -101,17 +101,24 @@ st.caption("Powered by Google Gemini 1.5 Flash")
 # Function to connect to PostgreSQL (Supabase)
 def connect_to_postgres():
     try:
+        # Direct connection using the correct Supabase hostname
         conn = psycopg2.connect(
-            host=st.secrets["database"]["host"],
+            host="db.gcbtetkxkkabbpwagtms.supabase.co",
             database=st.secrets["database"]["name"],
             user=st.secrets["database"]["user"],
             password=st.secrets["database"]["password"],
             port=st.secrets["database"]["port"],
+            connect_timeout=10,
             sslmode='require'  # Required for Supabase
         )
         return conn
     except Exception as e:
         st.error(f"Database connection error: {e}")
+        
+        # Show detailed error information for debugging
+        st.error(f"Connection details: Host=db.gcbtetkxkkabbpwagtms.supabase.co, DB=postgres, User=postgres, Port=5432")
+        import traceback
+        st.error(traceback.format_exc())
         return None
 
 # Function to test the connection
