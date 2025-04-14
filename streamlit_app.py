@@ -101,25 +101,29 @@ st.caption("Powered by Google Gemini 1.5 Flash")
 # Function to connect to PostgreSQL (Supabase)
 def connect_to_postgres():
     try:
-        # Direct connection using the correct Supabase hostname
+        # Try connection with Supabase connection pooler
         conn = psycopg2.connect(
-            host="db.gcbtetkxkkabbpwagtms.supabase.co",
+            host="connection-pooler.gcbtetkxkkabbpwagtms.supabase.co",  # Use connection pooler hostname
             database=st.secrets["database"]["name"],
             user=st.secrets["database"]["user"],
             password=st.secrets["database"]["password"],
-            port=st.secrets["database"]["port"],
-            connect_timeout=10,
+            port=6543,  # Connection pooler uses port 6543
+            connect_timeout=15,
             sslmode='require'  # Required for Supabase
         )
         return conn
     except Exception as e:
-        st.error(f"Database connection error: {e}")
+        st.error(f"Connection pooler error: {e}")
         
-        # Show detailed error information for debugging
-        st.error(f"Connection details: Host=db.gcbtetkxkkabbpwagtms.supabase.co, DB=postgres, User=postgres, Port=5432")
-        import traceback
-        st.error(traceback.format_exc())
-        return None
+        # Try alternative connection string as fallback
+        try:
+            st.warning("Trying alternative connection method...")
+            connection_string = f"postgresql://postgres:{st.secrets['database']['password']}@connection-pooler.gcbtetkxkkabbpwagtms.supabase.co:6543/postgres?sslmode=require"
+            conn = psycopg2.connect(connection_string)
+            return conn
+        except Exception as alt_e:
+            st.error(f"All connection attempts failed: {alt_e}")
+            return None
 
 # Function to test the connection
 def test_connection():
