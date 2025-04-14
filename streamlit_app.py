@@ -1,7 +1,5 @@
 import streamlit as st
 import google.generativeai as genai
-
-#for supadb
 import psycopg2
 import pandas as pd
 
@@ -145,116 +143,113 @@ def execute_query(query, params=None):
             return None
     return None
 
-# Main app
-def main():
-    st.title("Charity Database Explorer")
+# Charity Database Explorer
+st.markdown("---")
+st.title("Charity Database Explorer")
+
+# Test connection
+if st.button("Test Database Connection"):
+    test_connection()
+
+# Display charities
+st.subheader("Charities in Database")
+charities = execute_query("SELECT * FROM charities")
+
+if charities is not None and not charities.empty:
+    st.dataframe(charities)
     
-    # Test connection
-    if st.button("Test Database Connection"):
-        test_connection()
+    # Select a charity to view details
+    charity_names = charities['name'].tolist()
+    selected_charity = st.selectbox("Select a charity to view details:", charity_names)
     
-    # Display charities
-    st.subheader("Charities in Database")
-    charities = execute_query("SELECT * FROM charities")
-    
-    if charities is not None and not charities.empty:
-        st.dataframe(charities)
+    if selected_charity:
+        charity_id = charities[charities['name'] == selected_charity]['charity_id'].iloc[0]
         
-        # Select a charity to view details
-        charity_names = charities['name'].tolist()
-        selected_charity = st.selectbox("Select a charity to view details:", charity_names)
+        # Create tabs for different sections
+        tabs = st.tabs(["Overview", "Highlights", "Impact", "People", "Financials"])
         
-        if selected_charity:
-            charity_id = charities[charities['name'] == selected_charity]['charity_id'].iloc[0]
-            
-            # Create tabs for different sections
-            tabs = st.tabs(["Overview", "Highlights", "Impact", "People", "Financials"])
-            
-            # Overview tab
-            with tabs[0]:
-                st.write(f"### {selected_charity}")
-                charity_info = charities[charities['name'] == selected_charity].iloc[0]
-                st.write(f"**Founded:** {charity_info['founded_year']}")
-                st.write(f"**Website:** {charity_info['website']}")
-                st.write(charity_info['description'])
-            
-            # Highlights tab
-            with tabs[1]:
-                highlights = execute_query(
-                    "SELECT highlight_text FROM charity_highlights WHERE charity_id = %s ORDER BY display_order",
-                    (charity_id,)
-                )
-                if highlights is not None and not highlights.empty:
-                    for i, row in highlights.iterrows():
-                        st.write(f"✓ {row['highlight_text']}")
-                else:
-                    st.write("No highlights found.")
-            
-            # Impact tab
-            with tabs[2]:
-                impact = execute_query(
-                    "SELECT impact_description FROM charity_impact_areas WHERE charity_id = %s ORDER BY display_order",
-                    (charity_id,)
-                )
-                if impact is not None and not impact.empty:
-                    for i, row in impact.iterrows():
-                        st.write(f"{i+1}. {row['impact_description']}")
-                else:
-                    st.write("No impact information found.")
-            
-            # Ask Gemini about this charity
-            if st.button("Analyze with Gemini"):
-                with st.spinner("Generating insights with Gemini..."):
-                    # Get all charity data
-                    query = """
-                    SELECT 
-                        c.name, c.description, c.founded_year,
-                        STRING_AGG(DISTINCT ci.impact_description, ' | ') as impact_areas,
-                        STRING_AGG(DISTINCT ch.highlight_text, ' | ') as highlights,
-                        cf.donation_income, cf.fundraising_efficiency, cf.program_expense_ratio
-                    FROM charities c
-                    LEFT JOIN charity_impact_areas ci ON c.charity_id = ci.charity_id
-                    LEFT JOIN charity_highlights ch ON c.charity_id = ch.charity_id
-                    LEFT JOIN charity_financials cf ON c.charity_id = cf.charity_id
-                    WHERE c.charity_id = %s
-                    GROUP BY c.charity_id, c.name, c.description, c.founded_year, 
-                             cf.donation_income, cf.fundraising_efficiency, cf.program_expense_ratio
+        # Overview tab
+        with tabs[0]:
+            st.write(f"### {selected_charity}")
+            charity_info = charities[charities['name'] == selected_charity].iloc[0]
+            st.write(f"**Founded:** {charity_info['founded_year']}")
+            st.write(f"**Website:** {charity_info['website']}")
+            st.write(charity_info['description'])
+        
+        # Highlights tab
+        with tabs[1]:
+            highlights = execute_query(
+                "SELECT highlight_text FROM charity_highlights WHERE charity_id = %s ORDER BY display_order",
+                (charity_id,)
+            )
+            if highlights is not None and not highlights.empty:
+                for i, row in highlights.iterrows():
+                    st.write(f"✓ {row['highlight_text']}")
+            else:
+                st.write("No highlights found.")
+        
+        # Impact tab
+        with tabs[2]:
+            impact = execute_query(
+                "SELECT impact_description FROM charity_impact_areas WHERE charity_id = %s ORDER BY display_order",
+                (charity_id,)
+            )
+            if impact is not None and not impact.empty:
+                for i, row in impact.iterrows():
+                    st.write(f"{i+1}. {row['impact_description']}")
+            else:
+                st.write("No impact information found.")
+        
+        # Ask Gemini about this charity
+        if st.button("Analyze with Gemini"):
+            with st.spinner("Generating insights with Gemini..."):
+                # Get all charity data
+                query = """
+                SELECT 
+                    c.name, c.description, c.founded_year,
+                    STRING_AGG(DISTINCT ci.impact_description, ' | ') as impact_areas,
+                    STRING_AGG(DISTINCT ch.highlight_text, ' | ') as highlights,
+                    cf.donation_income, cf.fundraising_efficiency, cf.program_expense_ratio
+                FROM charities c
+                LEFT JOIN charity_impact_areas ci ON c.charity_id = ci.charity_id
+                LEFT JOIN charity_highlights ch ON c.charity_id = ch.charity_id
+                LEFT JOIN charity_financials cf ON c.charity_id = cf.charity_id
+                WHERE c.charity_id = %s
+                GROUP BY c.charity_id, c.name, c.description, c.founded_year, 
+                         cf.donation_income, cf.fundraising_efficiency, cf.program_expense_ratio
+                """
+                
+                charity_data = execute_query(query, (charity_id,))
+                
+                if charity_data is not None and not charity_data.empty:
+                    # Create prompt for Gemini
+                    charity = charity_data.iloc[0]
+                    prompt = f"""
+                    Analyze this charity and provide insights:
+                    
+                    Name: {charity['name']}
+                    Founded: {charity['founded_year']}
+                    Description: {charity['description']}
+                    
+                    Impact Areas:
+                    {charity['impact_areas']}
+                    
+                    Highlights:
+                    {charity['highlights']}
+                    
+                    Financial Information:
+                    - Donation Income: ${charity.get('donation_income', 'N/A')}
+                    - Fundraising Efficiency: {charity.get('fundraising_efficiency', 'N/A')}%
+                    - Program Expense Ratio: {charity.get('program_expense_ratio', 'N/A')}%
+                    
+                    Provide a comprehensive analysis of this charity's strengths, potential impact, and effectiveness.
                     """
                     
-                    charity_data = execute_query(query, (charity_id,))
-                    
-                    if charity_data is not None and not charity_data.empty:
-                        # Create prompt for Gemini
-                        charity = charity_data.iloc[0]
-                        prompt = f"""
-                        Analyze this charity and provide insights:
-                        
-                        Name: {charity['name']}
-                        Founded: {charity['founded_year']}
-                        Description: {charity['description']}
-                        
-                        Impact Areas:
-                        {charity['impact_areas']}
-                        
-                        Highlights:
-                        {charity['highlights']}
-                        
-                        Financial Information:
-                        - Donation Income: ${charity.get('donation_income', 'N/A')}
-                        - Fundraising Efficiency: {charity.get('fundraising_efficiency', 'N/A')}%
-                        - Program Expense Ratio: {charity.get('program_expense_ratio', 'N/A')}%
-                        
-                        Provide a comprehensive analysis of this charity's strengths, potential impact, and effectiveness.
-                        """
-                        
-                        # Get analysis from Gemini
-                        response = model.generate_content(prompt)
-                        st.subheader("Gemini Analysis")
-                        st.markdown(response.text)
-                    else:
-                        st.error("Could not retrieve complete charity data for analysis")
-    else:
-        st.info("No charities found in the database.")
-
-if __name__ == "__main__":
-    main()
+                    # Get analysis from Gemini
+                    response = model.generate_content(prompt)
+                    st.subheader("Gemini Analysis")
+                    st.markdown(response.text)
+                else:
+                    st.error("Could not retrieve complete charity data for analysis")
+else:
+    st.info("No charities found in the database.")
