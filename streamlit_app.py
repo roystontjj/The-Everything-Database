@@ -4,7 +4,7 @@ import google.generativeai as genai
 # Page config and styling
 st.set_page_config(page_title="Gemini AI Assistant", layout="wide")
 
-# Custom CSS for better UI
+# Custom CSS for better UI with improved contrast
 st.markdown("""
 <style>
     .main {
@@ -16,13 +16,15 @@ st.markdown("""
         padding: 1rem;
     }
     .user-message {
-        background-color: #f0f2f6;
+        background-color: #2b3a55;
+        color: white;
         padding: 1rem;
         border-radius: 0.5rem;
         margin-bottom: 1rem;
     }
     .assistant-message {
-        background-color: #e6f3ff;
+        background-color: #3e4a61;
+        color: white;
         padding: 1rem;
         border-radius: 0.5rem;
         margin-bottom: 1rem;
