@@ -1,7 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
-import psycopg2
 import pandas as pd
+from supabase import create_client
 
 # Page config and styling
 st.set_page_config(page_title="Gemini AI Assistant", layout="wide")
@@ -98,61 +98,58 @@ if submit_button and user_prompt:
 st.markdown("---")
 st.caption("Powered by Google Gemini 1.5 Flash")
 
-# Function to connect to PostgreSQL (Supabase)
-def connect_to_postgres():
-    try:
-        # Try connection with Supabase connection pooler
-        conn = psycopg2.connect(
-            host="connection-pooler.gcbtetkxkkabbpwagtms.supabase.co",  # Use connection pooler hostname
-            database=st.secrets["database"]["name"],
-            user=st.secrets["database"]["user"],
-            password=st.secrets["database"]["password"],
-            port=6543,  # Connection pooler uses port 6543
-            connect_timeout=15,
-            sslmode='require'  # Required for Supabase
-        )
-        return conn
-    except Exception as e:
-        st.error(f"Connection pooler error: {e}")
-        
-        # Try alternative connection string as fallback
-        try:
-            st.warning("Trying alternative connection method...")
-            connection_string = f"postgresql://postgres:{st.secrets['database']['password']}@connection-pooler.gcbtetkxkkabbpwagtms.supabase.co:6543/postgres?sslmode=require"
-            conn = psycopg2.connect(connection_string)
-            return conn
-        except Exception as alt_e:
-            st.error(f"All connection attempts failed: {alt_e}")
-            return None
+# Initialize Supabase client
+try:
+    supabase = create_client(
+        st.secrets["SUPABASE_URL"],
+        st.secrets["SUPABASE_KEY"]
+    )
+    st.session_state.supabase_client = supabase
+except Exception as e:
+    st.error(f"Failed to initialize Supabase client: {e}")
 
-# Function to test the connection
+# Function to test the Supabase connection
 def test_connection():
-    conn = connect_to_postgres()
-    if conn:
+    try:
+        # Just fetch a small amount of data to test the connection
+        response = supabase.table('charities').select('*').limit(1).execute()
         st.success("✅ Successfully connected to Supabase!")
-        cursor = conn.cursor()
-        cursor.execute("SELECT 'Connection is working!'")
-        result = cursor.fetchone()
-        st.write(result[0])
-        conn.close()
         return True
-    else:
-        st.error("❌ Failed to connect to the database")
+    except Exception as e:
+        st.error(f"❌ Failed to connect to Supabase API: {e}")
         return False
 
-# Function to execute query
-def execute_query(query, params=None):
-    conn = connect_to_postgres()
-    if conn:
-        try:
-            df = pd.read_sql_query(query, conn, params=params)
-            conn.close()
+# Function to execute query via Supabase API
+def execute_query(table_name, select_columns="*", filters=None, order_by=None, limit=None):
+    try:
+        # Start with a basic query
+        query = supabase.table(table_name).select(select_columns)
+        
+        # Apply filters if provided
+        if filters:
+            for column, value in filters.items():
+                query = query.eq(column, value)
+        
+        # Apply order by if provided
+        if order_by:
+            query = query.order(order_by)
+            
+        # Apply limit if provided
+        if limit:
+            query = query.limit(limit)
+            
+        # Execute the query
+        response = query.execute()
+        
+        # Convert to pandas DataFrame
+        if response.data:
+            df = pd.DataFrame(response.data)
             return df
-        except Exception as e:
-            st.error(f"Query execution error: {e}")
-            conn.close()
-            return None
-    return None
+        else:
+            return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Query execution error: {e}")
+        return None
 
 # Charity Database Explorer
 st.markdown("---")
@@ -164,7 +161,7 @@ if st.button("Test Database Connection"):
 
 # Display charities
 st.subheader("Charities in Database")
-charities = execute_query("SELECT * FROM charities")
+charities = execute_query("charities")
 
 if charities is not None and not charities.empty:
     st.dataframe(charities)
@@ -177,7 +174,7 @@ if charities is not None and not charities.empty:
         charity_id = charities[charities['name'] == selected_charity]['charity_id'].iloc[0]
         
         # Create tabs for different sections
-        tabs = st.tabs(["Overview", "Highlights", "Impact", "People", "Financials"])
+        tabs = st.tabs(["Overview", "Highlights", "Impact", "Financials"])
         
         # Overview tab
         with tabs[0]:
@@ -189,10 +186,7 @@ if charities is not None and not charities.empty:
         
         # Highlights tab
         with tabs[1]:
-            highlights = execute_query(
-                "SELECT highlight_text FROM charity_highlights WHERE charity_id = %s ORDER BY display_order",
-                (charity_id,)
-            )
+            highlights = execute_query("charity_highlights", filters={"charity_id": charity_id}, order_by="display_order")
             if highlights is not None and not highlights.empty:
                 for i, row in highlights.iterrows():
                     st.write(f"✓ {row['highlight_text']}")
@@ -201,10 +195,7 @@ if charities is not None and not charities.empty:
         
         # Impact tab
         with tabs[2]:
-            impact = execute_query(
-                "SELECT impact_description FROM charity_impact_areas WHERE charity_id = %s ORDER BY display_order",
-                (charity_id,)
-            )
+            impact = execute_query("charity_impact_areas", filters={"charity_id": charity_id}, order_by="display_order")
             if impact is not None and not impact.empty:
                 for i, row in impact.iterrows():
                     st.write(f"{i+1}. {row['impact_description']}")
@@ -215,52 +206,48 @@ if charities is not None and not charities.empty:
         if st.button("Analyze with Gemini"):
             with st.spinner("Generating insights with Gemini..."):
                 # Get all charity data
-                query = """
-                SELECT 
-                    c.name, c.description, c.founded_year,
-                    STRING_AGG(DISTINCT ci.impact_description, ' | ') as impact_areas,
-                    STRING_AGG(DISTINCT ch.highlight_text, ' | ') as highlights,
-                    cf.donation_income, cf.fundraising_efficiency, cf.program_expense_ratio
-                FROM charities c
-                LEFT JOIN charity_impact_areas ci ON c.charity_id = ci.charity_id
-                LEFT JOIN charity_highlights ch ON c.charity_id = ch.charity_id
-                LEFT JOIN charity_financials cf ON c.charity_id = cf.charity_id
-                WHERE c.charity_id = %s
-                GROUP BY c.charity_id, c.name, c.description, c.founded_year, 
-                         cf.donation_income, cf.fundraising_efficiency, cf.program_expense_ratio
+                charity_data = {}
+                charity_data.update(charity_info.to_dict())
+                
+                # Add impact and highlights
+                if impact is not None and not impact.empty:
+                    impact_text = " | ".join(impact['impact_description'].tolist())
+                    charity_data['impact_areas'] = impact_text
+                
+                if highlights is not None and not highlights.empty:
+                    highlights_text = " | ".join(highlights['highlight_text'].tolist())
+                    charity_data['highlights'] = highlights_text
+                
+                # Get financials if available
+                financials = execute_query("charity_financials", filters={"charity_id": charity_id})
+                if financials is not None and not financials.empty:
+                    charity_data.update(financials.iloc[0].to_dict())
+                
+                # Create prompt for Gemini
+                prompt = f"""
+                Analyze this charity and provide insights:
+                
+                Name: {charity_data.get('name', 'N/A')}
+                Founded: {charity_data.get('founded_year', 'N/A')}
+                Description: {charity_data.get('description', 'N/A')}
+                
+                Impact Areas:
+                {charity_data.get('impact_areas', 'N/A')}
+                
+                Highlights:
+                {charity_data.get('highlights', 'N/A')}
+                
+                Financial Information:
+                - Donation Income: ${charity_data.get('donation_income', 'N/A')}
+                - Fundraising Efficiency: {charity_data.get('fundraising_efficiency', 'N/A')}%
+                - Program Expense Ratio: {charity_data.get('program_expense_ratio', 'N/A')}%
+                
+                Provide a comprehensive analysis of this charity's strengths, potential impact, and effectiveness.
                 """
                 
-                charity_data = execute_query(query, (charity_id,))
-                
-                if charity_data is not None and not charity_data.empty:
-                    # Create prompt for Gemini
-                    charity = charity_data.iloc[0]
-                    prompt = f"""
-                    Analyze this charity and provide insights:
-                    
-                    Name: {charity['name']}
-                    Founded: {charity['founded_year']}
-                    Description: {charity['description']}
-                    
-                    Impact Areas:
-                    {charity['impact_areas']}
-                    
-                    Highlights:
-                    {charity['highlights']}
-                    
-                    Financial Information:
-                    - Donation Income: ${charity.get('donation_income', 'N/A')}
-                    - Fundraising Efficiency: {charity.get('fundraising_efficiency', 'N/A')}%
-                    - Program Expense Ratio: {charity.get('program_expense_ratio', 'N/A')}%
-                    
-                    Provide a comprehensive analysis of this charity's strengths, potential impact, and effectiveness.
-                    """
-                    
-                    # Get analysis from Gemini
-                    response = model.generate_content(prompt)
-                    st.subheader("Gemini Analysis")
-                    st.markdown(response.text)
-                else:
-                    st.error("Could not retrieve complete charity data for analysis")
+                # Get analysis from Gemini
+                response = model.generate_content(prompt)
+                st.subheader("Gemini Analysis")
+                st.markdown(response.text)
 else:
     st.info("No charities found in the database.")
