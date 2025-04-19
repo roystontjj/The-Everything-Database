@@ -64,13 +64,22 @@ TABLE_CONFIGS = [
     }
 ]
 
+def log_with_timestamp(message):
+    """Add a timestamped log message"""
+    timestamp = time.strftime("%H:%M:%S", time.localtime())
+    log_msg = f"[{timestamp}] {message}"
+    st.session_state.logs.append(log_msg)
+    return log_msg
+
 def connect_to_supabase():
     """Establish connection to Supabase"""
     try:
         client = create_client(st.session_state.supabase_url, st.session_state.supabase_key)
         return client
     except Exception as e:
-        st.error(f"Failed to connect to Supabase: {str(e)}")
+        error_msg = f"Failed to connect to Supabase: {str(e)}"
+        st.error(error_msg)
+        log_with_timestamp(error_msg)
         return None
 
 def initialize_gemini_api():
@@ -87,17 +96,23 @@ def initialize_gemini_api():
         embedding_model = "models/embedding-001"
         return embedding_model
     except Exception as e:
-        st.error(f"Failed to initialize Gemini API: {str(e)}")
+        error_msg = f"Failed to initialize Gemini API: {str(e)}"
+        st.error(error_msg)
+        log_with_timestamp(error_msg)
         return None
 
 def get_records_without_embeddings(supabase, table_config, limit=50) -> pd.DataFrame:
     """Fetch records that have empty embeddings"""
     try:
+        log_with_timestamp(f"Fetching records with NULL embeddings from {table_config['name']}")
+        
         result = supabase.table(table_config["name"]) \
             .select(f"{table_config['id_column']}, {table_config['text_column'] if table_config['text_column'] else '*'}") \
             .is_(table_config["embedding_column"], "null") \
             .limit(limit) \
             .execute()
+        
+        log_with_timestamp(f"Found {len(result.data)} records with NULL embeddings in {table_config['name']}")
         
         # Handle the case for charity_causes which requires joining with other tables
         if table_config["name"] == "charity_causes" and len(result.data) > 0:
@@ -130,14 +145,19 @@ def get_records_without_embeddings(supabase, table_config, limit=50) -> pd.DataF
         
         return pd.DataFrame(result.data)
     except Exception as e:
-        st.error(f"Error fetching records from {table_config['name']}: {str(e)}")
+        error_msg = f"Error fetching records from {table_config['name']}: {str(e)}"
+        st.error(error_msg)
+        log_with_timestamp(error_msg)
         return pd.DataFrame()
 
 def generate_embedding(text: str, model: str):
     """Generate embedding using Gemini API"""
     try:
         if not text or text.strip() == "":
+            log_with_timestamp("Cannot generate embedding for empty text")
             return None
+        
+        log_with_timestamp(f"Generating embedding for text: {text[:50]}...")
         
         embedding = genai.embed_content(
             model=model,
@@ -146,9 +166,13 @@ def generate_embedding(text: str, model: str):
         )
         
         # Return the embedding values as a list
-        return embedding["embedding"]
+        vector = embedding["embedding"]
+        log_with_timestamp(f"Generated embedding with {len(vector)} dimensions")
+        return vector
     except Exception as e:
-        st.error(f"Error generating embedding: {str(e)}")
+        error_msg = f"Error generating embedding: {str(e)}"
+        st.error(error_msg)
+        log_with_timestamp(error_msg)
         time.sleep(1)  # Add a small delay in case of rate limiting
         return None
 
@@ -156,13 +180,52 @@ def update_record_with_embedding(supabase, table_name: str, id_column: str, id_v
                                 embedding_column: str, embedding_vector: List[float]):
     """Update a record with its new embedding"""
     try:
-        supabase.table(table_name) \
-            .update({embedding_column: embedding_vector}) \
-            .eq(id_column, id_value) \
-            .execute()
-        return True
+        # Log the embedding details for debugging
+        log_with_timestamp(f"Updating {table_name} record {id_value} with embedding of length {len(embedding_vector)}")
+        
+        # Method 1: Try direct update with pgvector format
+        try:
+            # Format the vector as a PostgreSQL array string
+            # This is crucial for pgvector compatibility
+            vector_str = str(embedding_vector).replace('[', '{').replace(']', '}')
+            
+            # Use raw SQL via RPC to ensure proper vector formatting
+            result = supabase.rpc(
+                'update_embedding_vector',
+                {
+                    'p_table_name': table_name,
+                    'p_id_column': id_column,
+                    'p_id_value': id_value,
+                    'p_embedding_column': embedding_column,
+                    'p_embedding': embedding_vector
+                }
+            ).execute()
+            
+            # Check if there was an error in the RPC
+            if hasattr(result, 'error') and result.error:
+                log_with_timestamp(f"RPC Error: {result.error}")
+                raise Exception(f"RPC Error: {result.error}")
+                
+            log_with_timestamp(f"Successfully updated embedding for {table_name} record {id_value}")
+            return True
+            
+        except Exception as rpc_error:
+            # If RPC method fails, fall back to direct update method
+            log_with_timestamp(f"RPC update failed: {str(rpc_error)}. Falling back to direct update...")
+            
+            # Try direct update as a fallback
+            result = supabase.table(table_name) \
+                .update({embedding_column: embedding_vector}) \
+                .eq(id_column, id_value) \
+                .execute()
+                
+            log_with_timestamp(f"Direct update completed for {table_name} record {id_value}")
+            return True
+            
     except Exception as e:
-        st.error(f"Error updating record in {table_name}: {str(e)}")
+        error_msg = f"Error updating record in {table_name}: {str(e)}"
+        st.error(error_msg)
+        log_with_timestamp(error_msg)
         return False
 
 def process_table(supabase, table_config: Dict, embedding_model: str, batch_size: int):
@@ -172,19 +235,16 @@ def process_table(supabase, table_config: Dict, embedding_model: str, batch_size
     text_column = table_config["text_column"]
     embedding_column = table_config["embedding_column"]
     
-    log_msg = f"Processing table: {table_name}"
-    st.session_state.logs.append(log_msg)
+    log_with_timestamp(f"Processing table: {table_name}")
     
     # Get records without embeddings
     df = get_records_without_embeddings(supabase, table_config, batch_size)
     
     if df.empty:
-        log_msg = f"No records found with missing embeddings in {table_name}"
-        st.session_state.logs.append(log_msg)
+        log_with_timestamp(f"No records found with missing embeddings in {table_name}")
         return 0
     
-    log_msg = f"Found {len(df)} records with missing embeddings in {table_name}"
-    st.session_state.logs.append(log_msg)
+    log_with_timestamp(f"Found {len(df)} records with missing embeddings in {table_name}")
     
     updated_count = 0
     for _, row in df.iterrows():
@@ -194,28 +254,72 @@ def process_table(supabase, table_config: Dict, embedding_model: str, batch_size
         else:
             text_to_embed = row.get(text_column, "")
         
-        # Generate embedding
-        if text_to_embed:
-            embedding_vector = generate_embedding(text_to_embed, embedding_model)
+        if not text_to_embed or text_to_embed.strip() == "":
+            log_with_timestamp(f"Skipping {table_name} record with empty text")
+            continue
             
-            if embedding_vector:
-                # Update the record
-                id_value = row[id_column]
-                success = update_record_with_embedding(
-                    supabase, table_name, id_column, id_value, embedding_column, embedding_vector
-                )
-                
-                if success:
-                    updated_count += 1
-                    log_msg = f"Updated embedding for {table_name} record with {id_column}={id_value}"
-                    st.session_state.logs.append(log_msg)
-                
-                # Small delay to avoid hitting rate limits
-                time.sleep(0.5)
+        # Generate embedding
+        embedding_vector = generate_embedding(text_to_embed, embedding_model)
+        
+        if embedding_vector:
+            # Update the record
+            id_value = row[id_column]
+            success = update_record_with_embedding(
+                supabase, table_name, id_column, id_value, embedding_column, embedding_vector
+            )
+            
+            if success:
+                updated_count += 1
+                log_with_timestamp(f"Updated embedding for {table_name} record with {id_column}={id_value}")
+            else:
+                log_with_timestamp(f"Failed to update embedding for {table_name} record with {id_column}={id_value}")
+            
+            # Small delay to avoid hitting rate limits
+            time.sleep(0.5)
     
-    log_msg = f"Updated {updated_count} records in {table_name}"
-    st.session_state.logs.append(log_msg)
+    log_with_timestamp(f"Updated {updated_count} records in {table_name}")
     return updated_count
+
+def create_required_sql_functions(supabase):
+    """Create the necessary SQL functions in the database for vector operations"""
+    try:
+        log_with_timestamp("Checking/creating required SQL functions for vector operations...")
+        
+        # SQL to create the vector update function
+        sql = """
+        CREATE OR REPLACE FUNCTION update_embedding_vector(
+            p_table_name text,
+            p_id_column text,
+            p_id_value integer,
+            p_embedding_column text,
+            p_embedding float[]
+        ) RETURNS void AS $$
+        DECLARE
+            query text;
+        BEGIN
+            query := format('UPDATE %I SET %I = $1 WHERE %I = $2',
+                p_table_name, p_embedding_column, p_id_column);
+            EXECUTE query USING p_embedding, p_id_value;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+        
+        # Execute the SQL to create the function
+        result = supabase.rpc('exec_sql', {'sql': sql}).execute()
+        
+        if hasattr(result, 'error') and result.error:
+            log_with_timestamp(f"Error creating SQL function: {result.error}")
+            st.warning("Could not create required SQL functions. Make sure your database user has the necessary permissions.")
+            return False
+            
+        log_with_timestamp("Successfully created SQL functions for vector operations")
+        return True
+        
+    except Exception as e:
+        error_msg = f"Error creating SQL functions: {str(e)}"
+        st.error(error_msg)
+        log_with_timestamp(error_msg)
+        return False
 
 def run_embedding_update():
     """Main function to update embeddings for all tables"""
@@ -241,6 +345,10 @@ def run_embedding_update():
         st.session_state.processing = False
         return
     
+    # Create required SQL functions
+    if not create_required_sql_functions(supabase):
+        st.warning("Proceeding without custom SQL functions. Updates may not work correctly.")
+    
     # Initialize Gemini API
     embedding_model = initialize_gemini_api()
     if not embedding_model:
@@ -258,7 +366,7 @@ def run_embedding_update():
         # Update progress
         st.session_state.progress = (i + 1) / total_tables
     
-    st.session_state.logs.append(f"Completed embedding updates. Updated {total_updated} records in total.")
+    log_with_timestamp(f"Completed embedding updates. Updated {total_updated} records in total.")
     st.session_state.processing = False
 
 def show_embedding_generator():
@@ -305,6 +413,19 @@ def show_embedding_generator():
         This tool scans your Supabase database for records with empty embedding fields 
         and generates embeddings using the Gemini API.
         """)
+        
+        with st.expander("Advanced Options"):
+            # Add a button to manually create SQL functions
+            if st.button("Create SQL Functions"):
+                if st.session_state.supabase_url and st.session_state.supabase_key:
+                    supabase = connect_to_supabase()
+                    if supabase:
+                        if create_required_sql_functions(supabase):
+                            st.success("SQL functions created successfully!")
+                        else:
+                            st.error("Failed to create SQL functions.")
+                else:
+                    st.error("Please provide Supabase credentials first.")
     
     # Main app layout
     col1, col2 = st.columns([2, 1])
