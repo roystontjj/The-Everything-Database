@@ -363,25 +363,37 @@ def test_gemini_embedding_dimension(api_key):
     try:
         st.write("Testing Gemini embedding dimension...")
         
-        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-embedding-exp-03-07:embedContent?key={api_key}"
+        # The correct URL for gemini-embedding model
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent?key={api_key}"
         
+        # The proper payload structure for the embedding model
         payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "text": "This is a test sentence to determine embedding dimension."
-                        }
-                    ]
-                }
-            ]
+            "model": "models/embedding-001",
+            "content": {
+                "parts": [
+                    {"text": "This is a test sentence to determine embedding dimension."}
+                ]
+            }
         }
         
-        response = requests.post(url, json=payload)
+        # Add headers for the API request
+        headers = {
+            "Content-Type": "application/json"
+        }
+        
+        # Make the API call
+        response = requests.post(url, json=payload, headers=headers)
+        
+        # Print the response for debugging
+        st.write(f"Response status code: {response.status_code}")
+        if response.status_code != 200:
+            st.write(f"Response content: {response.text}")
+        
         response.raise_for_status()
         
+        # Parse the response correctly
         data = response.json()
-        embedding = data["embeddings"][0]["values"]
+        embedding = data["embedding"]["values"]
         
         dimension_size = len(embedding)
         st.success(f"Embedding dimension size: {dimension_size}")
@@ -390,12 +402,23 @@ def test_gemini_embedding_dimension(api_key):
         return dimension_size
     except Exception as e:
         st.error(f"Error testing Gemini embedding dimension: {e}")
+        st.write("Try printing your API key (first few chars only for security):")
+        if api_key:
+            st.write(f"API key starts with: {api_key[:5]}...")
+        else:
+            st.write("API key appears to be empty or None")
         return None
 
-# You can call this function in your app
-# For example:
+# Example of how to call the function in your Streamlit app
 if st.button("Test Gemini Embedding Dimension"):
-    api_key = st.secrets["GEMINI_API_KEY"]  # Store your API key in Streamlit secrets
-    dimension_size = test_gemini_embedding_dimension(api_key)
-    if dimension_size:
-        st.session_state.dimension_size = dimension_size  # Save it for later use
+    # Safely access the API key from Streamlit secrets
+    try:
+        api_key = st.secrets["GEMINI_API_KEY"]
+        if not api_key or api_key.strip() == "":
+            st.error("API key is empty. Please check your secrets.toml file.")
+        else:
+            dimension_size = test_gemini_embedding_dimension(api_key)
+            if dimension_size:
+                st.session_state.dimension_size = dimension_size  # Save it for later use
+    except KeyError:
+        st.error("GEMINI_API_KEY not found in secrets. Please add it to your .streamlit/secrets.toml file.")
