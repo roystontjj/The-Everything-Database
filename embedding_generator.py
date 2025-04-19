@@ -183,13 +183,9 @@ def update_record_with_embedding(supabase, table_name: str, id_column: str, id_v
         # Log the embedding details for debugging
         log_with_timestamp(f"Updating {table_name} record {id_value} with embedding of length {len(embedding_vector)}")
         
-        # Method 1: Try direct update with pgvector format
+        # Try the custom SQL function first
         try:
-            # Format the vector as a PostgreSQL array string
-            # This is crucial for pgvector compatibility
-            vector_str = str(embedding_vector).replace('[', '{').replace(']', '}')
-            
-            # Use raw SQL via RPC to ensure proper vector formatting
+            # Use the update_embedding_vector function that was manually created in SQL
             result = supabase.rpc(
                 'update_embedding_vector',
                 {
@@ -201,17 +197,12 @@ def update_record_with_embedding(supabase, table_name: str, id_column: str, id_v
                 }
             ).execute()
             
-            # Check if there was an error in the RPC
-            if hasattr(result, 'error') and result.error:
-                log_with_timestamp(f"RPC Error: {result.error}")
-                raise Exception(f"RPC Error: {result.error}")
-                
-            log_with_timestamp(f"Successfully updated embedding for {table_name} record {id_value}")
+            log_with_timestamp(f"Successfully updated embedding for {table_name} record {id_value} using SQL function")
             return True
             
         except Exception as rpc_error:
-            # If RPC method fails, fall back to direct update method
-            log_with_timestamp(f"RPC update failed: {str(rpc_error)}. Falling back to direct update...")
+            # Log the error and try the direct method
+            log_with_timestamp(f"RPC error: {str(rpc_error)}. Trying direct update...")
             
             # Try direct update as a fallback
             result = supabase.table(table_name) \
@@ -226,6 +217,9 @@ def update_record_with_embedding(supabase, table_name: str, id_column: str, id_v
         error_msg = f"Error updating record in {table_name}: {str(e)}"
         st.error(error_msg)
         log_with_timestamp(error_msg)
+        # Log more details about the error
+        log_with_timestamp(f"Error type: {type(e).__name__}")
+        log_with_timestamp(f"Vector length: {len(embedding_vector)}")
         return False
 
 def process_table(supabase, table_config: Dict, embedding_model: str, batch_size: int):
@@ -280,47 +274,6 @@ def process_table(supabase, table_config: Dict, embedding_model: str, batch_size
     log_with_timestamp(f"Updated {updated_count} records in {table_name}")
     return updated_count
 
-def create_required_sql_functions(supabase):
-    """Create the necessary SQL functions in the database for vector operations"""
-    try:
-        log_with_timestamp("Checking/creating required SQL functions for vector operations...")
-        
-        # SQL to create the vector update function
-        sql = """
-        CREATE OR REPLACE FUNCTION update_embedding_vector(
-            p_table_name text,
-            p_id_column text,
-            p_id_value integer,
-            p_embedding_column text,
-            p_embedding float[]
-        ) RETURNS void AS $$
-        DECLARE
-            query text;
-        BEGIN
-            query := format('UPDATE %I SET %I = $1 WHERE %I = $2',
-                p_table_name, p_embedding_column, p_id_column);
-            EXECUTE query USING p_embedding, p_id_value;
-        END;
-        $$ LANGUAGE plpgsql;
-        """
-        
-        # Execute the SQL to create the function
-        result = supabase.rpc('exec_sql', {'sql': sql}).execute()
-        
-        if hasattr(result, 'error') and result.error:
-            log_with_timestamp(f"Error creating SQL function: {result.error}")
-            st.warning("Could not create required SQL functions. Make sure your database user has the necessary permissions.")
-            return False
-            
-        log_with_timestamp("Successfully created SQL functions for vector operations")
-        return True
-        
-    except Exception as e:
-        error_msg = f"Error creating SQL functions: {str(e)}"
-        st.error(error_msg)
-        log_with_timestamp(error_msg)
-        return False
-
 def run_embedding_update():
     """Main function to update embeddings for all tables"""
     if not st.session_state.supabase_url or not st.session_state.supabase_key:
@@ -345,15 +298,13 @@ def run_embedding_update():
         st.session_state.processing = False
         return
     
-    # Create required SQL functions
-    if not create_required_sql_functions(supabase):
-        st.warning("Proceeding without custom SQL functions. Updates may not work correctly.")
-    
     # Initialize Gemini API
     embedding_model = initialize_gemini_api()
     if not embedding_model:
         st.session_state.processing = False
         return
+    
+    log_with_timestamp("SQL function should be created manually in SQL Editor. Will use it if available.")
     
     total_tables = len(TABLE_CONFIGS)
     total_updated = 0
@@ -415,17 +366,28 @@ def show_embedding_generator():
         """)
         
         with st.expander("Advanced Options"):
-            # Add a button to manually create SQL functions
-            if st.button("Create SQL Functions"):
-                if st.session_state.supabase_url and st.session_state.supabase_key:
-                    supabase = connect_to_supabase()
-                    if supabase:
-                        if create_required_sql_functions(supabase):
-                            st.success("SQL functions created successfully!")
-                        else:
-                            st.error("Failed to create SQL functions.")
-                else:
-                    st.error("Please provide Supabase credentials first.")
+            st.info("""
+            **SQL Function for Vector Updates**
+            
+            For best results, create this function in your Supabase SQL Editor:
+            ```sql
+            CREATE OR REPLACE FUNCTION update_embedding_vector(
+                p_table_name text,
+                p_id_column text,
+                p_id_value integer,
+                p_embedding_column text,
+                p_embedding float[]
+            ) RETURNS void AS $$
+            DECLARE
+                query text;
+            BEGIN
+                query := format('UPDATE %I SET %I = $1 WHERE %I = $2',
+                    p_table_name, p_embedding_column, p_id_column);
+                EXECUTE query USING p_embedding, p_id_value;
+            END;
+            $$ LANGUAGE plpgsql;
+            ```
+            """)
     
     # Main app layout
     col1, col2 = st.columns([2, 1])
