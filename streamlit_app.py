@@ -2,6 +2,8 @@ import streamlit as st
 import google.generativeai as genai
 import pandas as pd
 from supabase import create_client
+import requests
+import json
 
 # Page config and styling
 st.set_page_config(page_title="Gemini AI Assistant", layout="wide")
@@ -355,3 +357,45 @@ with st.expander("Charity Database Explorer", expanded=False):
                     st.markdown(response.text)
     else:
         st.info("No charities found in the database.")
+
+# Add this function to your Streamlit app to make gemini test call
+def test_gemini_embedding_dimension(api_key):
+    try:
+        st.write("Testing Gemini embedding dimension...")
+        
+        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-embedding-exp-03-07:embedContent?key={api_key}"
+        
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "text": "This is a test sentence to determine embedding dimension."
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        response = requests.post(url, json=payload)
+        response.raise_for_status()
+        
+        data = response.json()
+        embedding = data["embeddings"][0]["values"]
+        
+        dimension_size = len(embedding)
+        st.success(f"Embedding dimension size: {dimension_size}")
+        st.write(f"Sample of first few values: {embedding[:5]}")
+        
+        return dimension_size
+    except Exception as e:
+        st.error(f"Error testing Gemini embedding dimension: {e}")
+        return None
+
+# You can call this function in your app
+# For example:
+if st.button("Test Gemini Embedding Dimension"):
+    api_key = st.secrets["GEMINI_API_KEY"]  # Store your API key in Streamlit secrets
+    dimension_size = test_gemini_embedding_dimension(api_key)
+    if dimension_size:
+        st.session_state.dimension_size = dimension_size  # Save it for later use
