@@ -5,8 +5,8 @@ from supabase import create_client
 import requests
 import json
 
-# Page config and styling
-st.set_page_config(page_title="Gemini AI Assistant", layout="wide")
+# Page config and styling (should be at the top before any content is displayed)
+st.set_page_config(page_title="Gemini AI Charity Assistant", layout="wide")
 
 # Custom CSS for better UI with improved contrast
 st.markdown("""
@@ -36,39 +36,57 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# App title
-st.title("💬 Gemini AI Assistant")
-st.markdown("Ask questions, get creative content, or request assistance with various tasks. You can also ask about the charity database!")
-
-# Get API key from Streamlit secrets
-api_key = st.secrets["GEMINI_API_KEY"]
-genai.configure(api_key=api_key)
-
-# Initialize the Gemini model
-model = genai.GenerativeModel('gemini-1.5-flash')
-
-# Initialize session state for chat history
+# Initialize session state variables
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "page" not in st.session_state:
+    st.session_state.page = "Main Dashboard"
+if "supabase_url" not in st.session_state:
+    st.session_state.supabase_url = ""
+if "supabase_key" not in st.session_state:
+    st.session_state.supabase_key = ""
+if "gemini_api_key" not in st.session_state:
+    st.session_state.gemini_api_key = ""
+if "batch_size" not in st.session_state:
+    st.session_state.batch_size = 10
+if "processing" not in st.session_state:
+    st.session_state.processing = False
+if "progress" not in st.session_state:
+    st.session_state.progress = 0
+if "logs" not in st.session_state:
+    st.session_state.logs = []
 
-if "chat" not in st.session_state:
-    st.session_state.chat = model.start_chat(history=[])
+# Get API keys from Streamlit secrets
+try:
+    api_key = st.secrets["GEMINI_API_KEY"]
+    st.session_state.gemini_api_key = api_key
+    genai.configure(api_key=api_key)
+    
+    # Initialize the Gemini model
+    if "chat" not in st.session_state:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        st.session_state.model = model
+        st.session_state.chat = model.start_chat(history=[])
+except Exception as e:
+    st.sidebar.error(f"Failed to initialize Gemini API: {e}")
 
 # Initialize Supabase client
 try:
-    supabase = create_client(
-        st.secrets["SUPABASE_URL"],
-        st.secrets["SUPABASE_KEY"]
-    )
+    supabase_url = st.secrets["SUPABASE_URL"]
+    supabase_key = st.secrets["SUPABASE_KEY"]
+    st.session_state.supabase_url = supabase_url
+    st.session_state.supabase_key = supabase_key
+    
+    supabase = create_client(supabase_url, supabase_key)
     st.session_state.supabase_client = supabase
 except Exception as e:
-    st.error(f"Failed to initialize Supabase client: {e}")
+    st.sidebar.error(f"Failed to initialize Supabase client: {e}")
 
 # Function to test the Supabase connection
 def test_connection():
     try:
         # Just fetch a small amount of data to test the connection
-        response = supabase.table('charities').select('*').limit(1).execute()
+        response = st.session_state.supabase_client.table('charities').select('*').limit(1).execute()
         st.success("✅ Successfully connected to Supabase!")
         return True
     except Exception as e:
@@ -79,7 +97,7 @@ def test_connection():
 def execute_query(table_name, select_columns="*", filters=None, order_by=None, limit=None):
     try:
         # Start with a basic query
-        query = supabase.table(table_name).select(select_columns)
+        query = st.session_state.supabase_client.table(table_name).select(select_columns)
         
         # Apply filters if provided
         if filters:
@@ -144,7 +162,7 @@ def query_database_with_gemini(charity_name=None, topic=None):
         prompt = f"Analyze this charity database data and provide insights:\n{formatted_data}"
     
     # Get response from Gemini
-    return model.generate_content(prompt).text
+    return st.session_state.model.generate_content(prompt).text
 
 # Function to create database context for prompts
 def get_database_context():
@@ -174,191 +192,7 @@ def get_database_context():
     
     return context
 
-# Display chat history
-st.subheader("Conversation")
-chat_container = st.container(height=400)
-with chat_container:
-    for message in st.session_state.messages:
-        if message["role"] == "user":
-            st.markdown(f"<div class='user-message'><strong>You:</strong><br>{message['content']}</div>", unsafe_allow_html=True)
-        else:
-            st.markdown(f"<div class='assistant-message'><strong>Assistant:</strong><br>{message['content']}</div>", unsafe_allow_html=True)
-
-# User input section
-st.subheader("Your Question")
-with st.form(key="prompt_form", clear_on_submit=True):
-    user_prompt = st.text_area("Type your message here:", height=100, key="prompt_input")
-    
-    # Add a checkbox to explicitly query the database
-    include_db_context = st.checkbox("Include charity database context", value=False, 
-                                    help="Check this if your question is about the charity database")
-    
-    col1, col2 = st.columns([1, 5])
-    with col1:
-        submit_button = st.form_submit_button("Send", use_container_width=True)
-    with col2:
-        if st.form_submit_button("Clear Chat", use_container_width=True):
-            st.session_state.messages = []
-            st.session_state.chat = model.start_chat(history=[])
-            st.rerun()
-
-# Process the user input when the form is submitted
-if submit_button and user_prompt:
-    # Add user message to chat history
-    st.session_state.messages.append({"role": "user", "content": user_prompt})
-    
-    # Show a spinner while processing
-    with st.spinner("Thinking..."):
-        try:
-            # Check if this is a database-related question or user selected the checkbox
-            database_keywords = ["database", "charity", "charities", "data", "compare", 
-                               "impact", "financial", "highlights", "donation"]
-            
-            is_database_question = include_db_context or any(keyword in user_prompt.lower() for keyword in database_keywords)
-            
-            if is_database_question:
-                # Get database context
-                data_context = get_database_context()
-                
-                # Create prompt with database context
-                db_prompt = f"""
-                You are connected to a charity database with information about various charities.
-                Here's some sample data from the database:
-                {data_context}
-                
-                User question: {user_prompt}
-                
-                When answering, make use of the database information provided above.
-                """
-                
-                # Get response from Gemini with database context
-                response = model.generate_content(db_prompt)
-            else:
-                # Regular chat without database context
-                response = st.session_state.chat.send_message(user_prompt)
-                
-            # Add assistant response to chat history
-            st.session_state.messages.append({"role": "assistant", "content": response.text})
-        except Exception as e:
-            st.error(f"Error: {str(e)}")
-            st.session_state.messages.append({"role": "assistant", "content": f"Sorry, I encountered an error: {str(e)}"})
-    
-    # Rerun to update the UI with the new messages
-    st.rerun()
-
-# Add some footer information
-st.markdown("---")
-st.caption("Powered by Google Gemini 1.5 Flash")
-
-# Database connection test and Charity Database Explorer
-with st.expander("Charity Database Explorer", expanded=False):
-    # Test connection
-    if st.button("Test Database Connection"):
-        test_connection()
-
-    # Display charities
-    st.subheader("Charities in Database")
-    charities = execute_query("charities")
-
-    if charities is not None and not charities.empty:
-        st.dataframe(charities)
-        
-        # Select a charity to view details
-        charity_names = charities['name'].tolist()
-        selected_charity = st.selectbox("Select a charity to view details:", charity_names)
-        
-        if selected_charity:
-            charity_id = charities[charities['name'] == selected_charity]['charity_id'].iloc[0]
-            
-            # Create tabs for different sections
-            tabs = st.tabs(["Overview", "Highlights", "Impact", "Financials"])
-            
-            # Overview tab
-            with tabs[0]:
-                st.write(f"### {selected_charity}")
-                charity_info = charities[charities['name'] == selected_charity].iloc[0]
-                st.write(f"**Founded:** {charity_info['founded_year']}")
-                st.write(f"**Website:** {charity_info['website']}")
-                st.write(charity_info['description'])
-            
-            # Highlights tab
-            with tabs[1]:
-                highlights = execute_query("charity_highlights", filters={"charity_id": charity_id}, order_by="display_order")
-                if highlights is not None and not highlights.empty:
-                    for i, row in highlights.iterrows():
-                        st.write(f"✓ {row['highlight_text']}")
-                else:
-                    st.write("No highlights found.")
-            
-            # Impact tab
-            with tabs[2]:
-                impact = execute_query("charity_impact_areas", filters={"charity_id": charity_id}, order_by="display_order")
-                if impact is not None and not impact.empty:
-                    for i, row in impact.iterrows():
-                        st.write(f"{i+1}. {row['impact_description']}")
-                else:
-                    st.write("No impact information found.")
-            
-            # Financials tab
-            with tabs[3]:
-                financials = execute_query("charity_financials", filters={"charity_id": charity_id})
-                if financials is not None and not financials.empty:
-                    st.write(f"**Donation Income:** ${financials.iloc[0]['donation_income']:,.2f}")
-                    st.write(f"**Fundraising Efficiency:** {financials.iloc[0]['fundraising_efficiency']}%")
-                    st.write(f"**Program Expense Ratio:** {financials.iloc[0]['program_expense_ratio']}%")
-                else:
-                    st.write("No financial information found.")
-            
-            # Ask Gemini about this charity
-            if st.button("Analyze with Gemini"):
-                with st.spinner("Generating insights with Gemini..."):
-                    # Get all charity data
-                    charity_data = {}
-                    charity_data.update(charity_info.to_dict())
-                    
-                    # Add impact and highlights
-                    if impact is not None and not impact.empty:
-                        impact_text = " | ".join(impact['impact_description'].tolist())
-                        charity_data['impact_areas'] = impact_text
-                    
-                    if highlights is not None and not highlights.empty:
-                        highlights_text = " | ".join(highlights['highlight_text'].tolist())
-                        charity_data['highlights'] = highlights_text
-                    
-                    # Get financials if available
-                    if financials is not None and not financials.empty:
-                        charity_data.update(financials.iloc[0].to_dict())
-                    
-                    # Create prompt for Gemini
-                    prompt = f"""
-                    Analyze this charity and provide insights:
-                    
-                    Name: {charity_data.get('name', 'N/A')}
-                    Founded: {charity_data.get('founded_year', 'N/A')}
-                    Description: {charity_data.get('description', 'N/A')}
-                    
-                    Impact Areas:
-                    {charity_data.get('impact_areas', 'N/A')}
-                    
-                    Highlights:
-                    {charity_data.get('highlights', 'N/A')}
-                    
-                    Financial Information:
-                    - Donation Income: ${charity_data.get('donation_income', 'N/A')}
-                    - Fundraising Efficiency: {charity_data.get('fundraising_efficiency', 'N/A')}%
-                    - Program Expense Ratio: {charity_data.get('program_expense_ratio', 'N/A')}%
-                    
-                    Provide a comprehensive analysis of this charity's strengths, potential impact, and effectiveness.
-                    """
-                    
-                    # Get analysis from Gemini
-                    response = model.generate_content(prompt)
-                    st.subheader("Gemini Analysis")
-                    st.markdown(response.text)
-    else:
-        st.info("No charities found in the database.")
-
-# Add this function to your Streamlit app to make gemini test call
+# Function to test Gemini embedding dimension
 def test_gemini_embedding_dimension(api_key):
     try:
         st.write("Testing Gemini embedding dimension...")
@@ -409,16 +243,328 @@ def test_gemini_embedding_dimension(api_key):
             st.write("API key appears to be empty or None")
         return None
 
-# Example of how to call the function in your Streamlit app
-if st.button("Test Gemini Embedding Dimension"):
-    # Safely access the API key from Streamlit secrets
-    try:
-        api_key = st.secrets["GEMINI_API_KEY"]
-        if not api_key or api_key.strip() == "":
-            st.error("API key is empty. Please check your secrets.toml file.")
+# Main Dashboard Page
+def show_main_dashboard():
+    st.title("Charity Data Dashboard")
+    st.markdown("Welcome to the Charity Data Dashboard. Use the navigation menu to explore different features.")
+    
+    # Display some basic statistics or information
+    st.subheader("Database Overview")
+    
+    # If we have a Supabase connection, show basic stats
+    if "supabase_client" in st.session_state:
+        try:
+            charities = execute_query("charities")
+            news = execute_query("charity_news")
+            people = execute_query("charity_people")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Charities", len(charities) if charities is not None and not charities.empty else 0)
+            with col2:
+                st.metric("News Items", len(news) if news is not None and not news.empty else 0)
+            with col3:
+                st.metric("People", len(people) if people is not None and not people.empty else 0)
+            with col4:
+                # Count records with missing embeddings
+                if charities is not None and not charities.empty:
+                    missing_embeddings = charities['embedding'].isna().sum()
+                    st.metric("Missing Embeddings", missing_embeddings)
+                
+        except Exception as e:
+            st.error(f"Error loading dashboard data: {str(e)}")
+    else:
+        st.info("Connect to your Supabase database to see statistics.")
+
+# Data Viewer Page
+def show_data_viewer():
+    st.title("Data Viewer")
+    
+    if "supabase_client" not in st.session_state:
+        st.warning("Please connect to your Supabase database first.")
+        return
+    
+    # Database connection test and Charity Database Explorer
+    with st.expander("Charity Database Explorer", expanded=True):
+        # Test connection
+        if st.button("Test Database Connection"):
+            test_connection()
+
+        # Display charities
+        st.subheader("Charities in Database")
+        charities = execute_query("charities")
+
+        if charities is not None and not charities.empty:
+            st.dataframe(charities)
+            
+            # Select a charity to view details
+            charity_names = charities['name'].tolist()
+            selected_charity = st.selectbox("Select a charity to view details:", charity_names)
+            
+            if selected_charity:
+                charity_id = charities[charities['name'] == selected_charity]['charity_id'].iloc[0]
+                
+                # Create tabs for different sections
+                tabs = st.tabs(["Overview", "Highlights", "Impact", "Financials"])
+                
+                # Overview tab
+                with tabs[0]:
+                    st.write(f"### {selected_charity}")
+                    charity_info = charities[charities['name'] == selected_charity].iloc[0]
+                    st.write(f"**Founded:** {charity_info['founded_year']}")
+                    st.write(f"**Website:** {charity_info['website']}")
+                    st.write(charity_info['description'])
+                
+                # Highlights tab
+                with tabs[1]:
+                    highlights = execute_query("charity_highlights", filters={"charity_id": charity_id}, order_by="display_order")
+                    if highlights is not None and not highlights.empty:
+                        for i, row in highlights.iterrows():
+                            st.write(f"✓ {row['highlight_text']}")
+                    else:
+                        st.write("No highlights found.")
+                
+                # Impact tab
+                with tabs[2]:
+                    impact = execute_query("charity_impact_areas", filters={"charity_id": charity_id}, order_by="display_order")
+                    if impact is not None and not impact.empty:
+                        for i, row in impact.iterrows():
+                            st.write(f"{i+1}. {row['impact_description']}")
+                    else:
+                        st.write("No impact information found.")
+                
+                # Financials tab
+                with tabs[3]:
+                    financials = execute_query("charity_financials", filters={"charity_id": charity_id})
+                    if financials is not None and not financials.empty:
+                        st.write(f"**Donation Income:** ${financials.iloc[0]['donation_income']:,.2f}")
+                        st.write(f"**Fundraising Efficiency:** {financials.iloc[0]['fundraising_efficiency']}%")
+                        st.write(f"**Program Expense Ratio:** {financials.iloc[0]['program_expense_ratio']}%")
+                    else:
+                        st.write("No financial information found.")
+                
+                # Ask Gemini about this charity
+                if st.button("Analyze with Gemini"):
+                    with st.spinner("Generating insights with Gemini..."):
+                        # Get all charity data
+                        charity_data = {}
+                        charity_data.update(charity_info.to_dict())
+                        
+                        # Add impact and highlights
+                        if impact is not None and not impact.empty:
+                            impact_text = " | ".join(impact['impact_description'].tolist())
+                            charity_data['impact_areas'] = impact_text
+                        
+                        if highlights is not None and not highlights.empty:
+                            highlights_text = " | ".join(highlights['highlight_text'].tolist())
+                            charity_data['highlights'] = highlights_text
+                        
+                        # Get financials if available
+                        if financials is not None and not financials.empty:
+                            charity_data.update(financials.iloc[0].to_dict())
+                        
+                        # Create prompt for Gemini
+                        prompt = f"""
+                        Analyze this charity and provide insights:
+                        
+                        Name: {charity_data.get('name', 'N/A')}
+                        Founded: {charity_data.get('founded_year', 'N/A')}
+                        Description: {charity_data.get('description', 'N/A')}
+                        
+                        Impact Areas:
+                        {charity_data.get('impact_areas', 'N/A')}
+                        
+                        Highlights:
+                        {charity_data.get('highlights', 'N/A')}
+                        
+                        Financial Information:
+                        - Donation Income: ${charity_data.get('donation_income', 'N/A')}
+                        - Fundraising Efficiency: {charity_data.get('fundraising_efficiency', 'N/A')}%
+                        - Program Expense Ratio: {charity_data.get('program_expense_ratio', 'N/A')}%
+                        
+                        Provide a comprehensive analysis of this charity's strengths, potential impact, and effectiveness.
+                        """
+                        
+                        # Get analysis from Gemini
+                        response = st.session_state.model.generate_content(prompt)
+                        st.subheader("Gemini Analysis")
+                        st.markdown(response.text)
         else:
-            dimension_size = test_gemini_embedding_dimension(api_key)
-            if dimension_size:
-                st.session_state.dimension_size = dimension_size  # Save it for later use
-    except KeyError:
-        st.error("GEMINI_API_KEY not found in secrets. Please add it to your .streamlit/secrets.toml file.")
+            st.info("No charities found in the database.")
+
+# Chat Interface Page
+def show_chat_interface():
+    st.title("💬 Gemini AI Assistant")
+    st.markdown("Ask questions, get creative content, or request assistance with various tasks. You can also ask about the charity database!")
+
+    # Display chat history
+    st.subheader("Conversation")
+    chat_container = st.container(height=400)
+    with chat_container:
+        for message in st.session_state.messages:
+            if message["role"] == "user":
+                st.markdown(f"<div class='user-message'><strong>You:</strong><br>{message['content']}</div>", unsafe_allow_html=True)
+            else:
+                st.markdown(f"<div class='assistant-message'><strong>Assistant:</strong><br>{message['content']}</div>", unsafe_allow_html=True)
+
+    # User input section
+    st.subheader("Your Question")
+    with st.form(key="prompt_form", clear_on_submit=True):
+        user_prompt = st.text_area("Type your message here:", height=100, key="prompt_input")
+        
+        # Add a checkbox to explicitly query the database
+        include_db_context = st.checkbox("Include charity database context", value=False, 
+                                        help="Check this if your question is about the charity database")
+        
+        col1, col2 = st.columns([1, 5])
+        with col1:
+            submit_button = st.form_submit_button("Send", use_container_width=True)
+        with col2:
+            if st.form_submit_button("Clear Chat", use_container_width=True):
+                st.session_state.messages = []
+                if "model" in st.session_state:
+                    st.session_state.chat = st.session_state.model.start_chat(history=[])
+                st.rerun()
+
+    # Process the user input when the form is submitted
+    if submit_button and user_prompt:
+        # Add user message to chat history
+        st.session_state.messages.append({"role": "user", "content": user_prompt})
+        
+        # Show a spinner while processing
+        with st.spinner("Thinking..."):
+            try:
+                # Check if this is a database-related question or user selected the checkbox
+                database_keywords = ["database", "charity", "charities", "data", "compare", 
+                                  "impact", "financial", "highlights", "donation"]
+                
+                is_database_question = include_db_context or any(keyword in user_prompt.lower() for keyword in database_keywords)
+                
+                if is_database_question:
+                    # Get database context
+                    data_context = get_database_context()
+                    
+                    # Create prompt with database context
+                    db_prompt = f"""
+                    You are connected to a charity database with information about various charities.
+                    Here's some sample data from the database:
+                    {data_context}
+                    
+                    User question: {user_prompt}
+                    
+                    When answering, make use of the database information provided above.
+                    """
+                    
+                    # Get response from Gemini with database context
+                    response = st.session_state.model.generate_content(db_prompt)
+                else:
+                    # Regular chat without database context
+                    response = st.session_state.chat.send_message(user_prompt)
+                    
+                # Add assistant response to chat history
+                st.session_state.messages.append({"role": "assistant", "content": response.text})
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
+                st.session_state.messages.append({"role": "assistant", "content": f"Sorry, I encountered an error: {str(e)}"})
+        
+        # Rerun to update the UI with the new messages
+        st.rerun()
+
+# Settings Page
+def show_settings():
+    st.title("Settings")
+    
+    st.subheader("Database Connection")
+    
+    # Supabase settings
+    col1, col2 = st.columns(2)
+    with col1:
+        supabase_url = st.text_input("Supabase URL", value=st.session_state.supabase_url, key="settings_supabase_url")
+    with col2:
+        supabase_key = st.text_input("Supabase API Key", type="password", value=st.session_state.supabase_key, key="settings_supabase_key")
+    
+    # Gemini API settings    
+    gemini_api_key = st.text_input("Gemini API Key", type="password", value=st.session_state.gemini_api_key, key="settings_gemini_api_key")
+    
+    # Save settings button
+    if st.button("Save Settings"):
+        st.session_state.supabase_url = supabase_url
+        st.session_state.supabase_key = supabase_key
+        st.session_state.gemini_api_key = gemini_api_key
+        
+        # Update connections
+        try:
+            if supabase_url and supabase_key:
+                supabase = create_client(supabase_url, supabase_key)
+                st.session_state.supabase_client = supabase
+                st.success("Supabase settings updated successfully!")
+            
+            if gemini_api_key:
+                genai.configure(api_key=gemini_api_key)
+                model = genai.GenerativeModel('gemini-1.5-flash')
+                st.session_state.model = model
+                st.session_state.chat = model.start_chat(history=[])
+                st.success("Gemini API settings updated successfully!")
+        except Exception as e:
+            st.error(f"Error updating settings: {str(e)}")
+    
+    # API Testing
+    st.subheader("API Testing")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Test Supabase Connection"):
+            if "supabase_client" in st.session_state:
+                test_connection()
+            else:
+                st.error("Please configure and save Supabase settings first.")
+    
+    with col2:
+        if st.button("Test Gemini Embedding Dimension"):
+            if st.session_state.gemini_api_key:
+                dimension_size = test_gemini_embedding_dimension(st.session_state.gemini_api_key)
+                if dimension_size:
+                    st.session_state.dimension_size = dimension_size
+            else:
+                st.error("Please configure and save Gemini API settings first.")
+
+# Now we'll import the embedding generator module
+try:
+    import embedding_generator
+except ImportError:
+    # Define a function to show a placeholder if the module is not available
+    def show_embedding_generator():
+        st.title("Embedding Generator")
+        st.error("The embedding_generator module is not available. Please make sure the file exists in the same directory.")
+        
+        # Show a code snippet to help the user create the file
+        st.code("""
+# Save this as embedding_generator.py in the same directory
+import streamlit as st
+
+def show_embedding_generator():
+    st.title("Database Embeddings Generator")
+    st.info("This is a placeholder. Please implement the full embedding generator.")
+    
+    # Add your embedding generator code here
+""", language="python")
+
+# Sidebar navigation
+st.sidebar.title("Navigation")
+pages = {
+    "Main Dashboard": show_main_dashboard,
+    "Chat Interface": show_chat_interface,
+    "Data Viewer": show_data_viewer,
+    "Embedding Generator": embedding_generator.show_embedding_generator if 'embedding_generator' in globals() else show_embedding_generator,
+    "Settings": show_settings
+}
+
+selected_page = st.sidebar.radio("Go to", list(pages.keys()))
+st.session_state.page = selected_page
+
+# Display the selected page
+pages[selected_page]()
+
+# Add footer
+st.markdown("---")
+st.caption("Powered by Google Gemini 1.5 Flash")
