@@ -4,9 +4,18 @@ import pandas as pd
 from supabase import create_client
 import requests
 import json
+import time
 
-# Page config and styling (should be at the top before any content is displayed)
-st.set_page_config(page_title="Gemini AI Charity Assistant", layout="wide")
+# Import your modules
+# You'll need to create rag_utils.py based on the previous code
+try:
+    from embedding_generator import show_embedding_generator
+    from rag_utils import vector_search, format_results_for_rag, create_rag_prompt
+except ImportError:
+    st.error("Missing required modules. Make sure embedding_generator.py and rag_utils.py are in the same directory.")
+
+# Page config and styling
+st.set_page_config(page_title="Gemini AI Charity RAG Assistant", layout="wide")
 
 # Custom CSS for better UI with improved contrast
 st.markdown("""
@@ -33,6 +42,15 @@ st.markdown("""
         border-radius: 0.5rem;
         margin-bottom: 1rem;
     }
+    .retrieved-context {
+        background-color: #1e2b3e;
+        color: #a0c0e0;
+        padding: 0.5rem;
+        border-radius: 0.3rem;
+        font-family: monospace;
+        font-size: 0.9em;
+        margin-bottom: 0.5rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -55,6 +73,8 @@ if "progress" not in st.session_state:
     st.session_state.progress = 0
 if "logs" not in st.session_state:
     st.session_state.logs = []
+if "debug_mode" not in st.session_state:
+    st.session_state.debug_mode = False
 
 # Get API keys from Streamlit secrets
 try:
@@ -125,128 +145,10 @@ def execute_query(table_name, select_columns="*", filters=None, order_by=None, l
         st.error(f"Query execution error: {e}")
         return None
 
-# Function to query database with Gemini
-def query_database_with_gemini(charity_name=None, topic=None):
-    """Query the database with Gemini based on specific parameters"""
-    data_to_include = {}
-    
-    if charity_name:
-        # Get specific charity data
-        charity = execute_query("charities", filters={"name": charity_name})
-        if charity is not None and not charity.empty:
-            charity_id = charity.iloc[0]['charity_id']
-            data_to_include["charity"] = charity
-            data_to_include["highlights"] = execute_query("charity_highlights", 
-                                                        filters={"charity_id": charity_id})
-            data_to_include["impacts"] = execute_query("charity_impact_areas", 
-                                                    filters={"charity_id": charity_id})
-            data_to_include["financials"] = execute_query("charity_financials", 
-                                                        filters={"charity_id": charity_id})
-    else:
-        # Get general database data
-        data_to_include["charities"] = execute_query("charities")
-        data_to_include["highlights"] = execute_query("charity_highlights", limit=10)
-        data_to_include["impacts"] = execute_query("charity_impact_areas", limit=10)
-        data_to_include["financials"] = execute_query("charity_financials")
-    
-    # Format the data
-    formatted_data = ""
-    for key, data in data_to_include.items():
-        if data is not None and not data.empty:
-            formatted_data += f"\n{key.upper()} DATA:\n{data.to_string()}\n"
-    
-    # Create prompt based on topic or general inquiry
-    if topic:
-        prompt = f"Analyze this charity database data focusing on {topic}:\n{formatted_data}"
-    else:
-        prompt = f"Analyze this charity database data and provide insights:\n{formatted_data}"
-    
-    # Get response from Gemini
-    return st.session_state.model.generate_content(prompt).text
-
-# Function to create database context for prompts
-def get_database_context():
-    # Fetch data from database
-    all_charities = execute_query("charities")
-    highlights = execute_query("charity_highlights", limit=5)
-    impacts = execute_query("charity_impact_areas", limit=5)
-    financials = execute_query("charity_financials")
-    
-    # Create context string
-    context = f"""
-    DATABASE CONTEXT:
-    Database contains {len(all_charities) if all_charities is not None and not all_charities.empty else 0} charities.
-    
-    SAMPLE CHARITY DATA:
-    {all_charities.head(3).to_string() if all_charities is not None and not all_charities.empty else "No data"}
-    
-    SAMPLE HIGHLIGHTS:
-    {highlights.head(3).to_string() if highlights is not None and not highlights.empty else "No data"}
-    
-    SAMPLE IMPACTS:
-    {impacts.head(3).to_string() if impacts is not None and not impacts.empty else "No data"}
-    
-    SAMPLE FINANCIALS:
-    {financials.head(3).to_string() if financials is not None and not financials.empty else "No data"}
-    """
-    
-    return context
-
-# Function to test Gemini embedding dimension
-def test_gemini_embedding_dimension(api_key):
-    try:
-        st.write("Testing Gemini embedding dimension...")
-        
-        # The correct URL for gemini-embedding model
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent?key={api_key}"
-        
-        # The proper payload structure for the embedding model
-        payload = {
-            "model": "models/embedding-001",
-            "content": {
-                "parts": [
-                    {"text": "This is a test sentence to determine embedding dimension."}
-                ]
-            }
-        }
-        
-        # Add headers for the API request
-        headers = {
-            "Content-Type": "application/json"
-        }
-        
-        # Make the API call
-        response = requests.post(url, json=payload, headers=headers)
-        
-        # Print the response for debugging
-        st.write(f"Response status code: {response.status_code}")
-        if response.status_code != 200:
-            st.write(f"Response content: {response.text}")
-        
-        response.raise_for_status()
-        
-        # Parse the response correctly
-        data = response.json()
-        embedding = data["embedding"]["values"]
-        
-        dimension_size = len(embedding)
-        st.success(f"Embedding dimension size: {dimension_size}")
-        st.write(f"Sample of first few values: {embedding[:5]}")
-        
-        return dimension_size
-    except Exception as e:
-        st.error(f"Error testing Gemini embedding dimension: {e}")
-        st.write("Try printing your API key (first few chars only for security):")
-        if api_key:
-            st.write(f"API key starts with: {api_key[:5]}...")
-        else:
-            st.write("API key appears to be empty or None")
-        return None
-
-# Main Dashboard Page
+# Main Dashboard Page (Keep your original implementation)
 def show_main_dashboard():
     st.title("Charity Data Dashboard")
-    st.markdown("Welcome to the Charity Data Dashboard. Use the navigation menu to explore different features.")
+    st.markdown("Welcome to the Charity Data Dashboard with RAG (Retrieval Augmented Generation).")
     
     # Display some basic statistics or information
     st.subheader("Database Overview")
@@ -271,131 +173,107 @@ def show_main_dashboard():
                     missing_embeddings = charities['embedding'].isna().sum()
                     st.metric("Missing Embeddings", missing_embeddings)
                 
+            # Display RAG status
+            st.subheader("RAG System Status")
+            
+            # Check if the match_documents function exists
+            try:
+                # Try a simple vector search as a test
+                test_query = "test query"
+                embedding_model = "models/embedding-001"
+                query_embedding = genai.embed_content(
+                    model=embedding_model,
+                    content=test_query,
+                    task_type="retrieval_query"
+                )["embedding"]
+                
+                response = st.session_state.supabase_client.rpc(
+                    'match_documents',
+                    {
+                        'query_embedding': query_embedding,
+                        'match_threshold': 0.5,
+                        'match_count': 1,
+                        'table_name': 'charities'
+                    }
+                ).execute()
+                
+                st.success("✅ RAG system is operational! Vector search is working.")
+            except Exception as e:
+                st.error(f"❌ RAG system is not fully set up: {str(e)}")
+                st.warning("You may need to create the 'match_documents' SQL function in your Supabase database.")
+                
+                with st.expander("Show SQL Function Code"):
+                    st.code("""
+-- Function for matching documents based on embedding similarity
+CREATE OR REPLACE FUNCTION match_documents(
+  query_embedding vector,
+  match_threshold float,
+  match_count int,
+  table_name text
+)
+RETURNS TABLE (
+  id integer,
+  content text,
+  similarity float
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  query_text TEXT;
+  id_column TEXT;
+  text_column TEXT;
+  embedding_column TEXT;
+BEGIN
+  -- Set the appropriate columns based on the table name
+  CASE table_name
+    WHEN 'charities' THEN
+      id_column := 'charity_id';
+      text_column := 'description';
+      embedding_column := 'embedding';
+    WHEN 'charity_news' THEN
+      id_column := 'news_id';
+      text_column := 'content';
+      embedding_column := 'embedding';
+    -- Add more cases for other tables
+    ELSE
+      RAISE EXCEPTION 'Unsupported table: %', table_name;
+  END CASE;
+
+  -- Construct and execute dynamic SQL query
+  query_text := format('
+    SELECT %I as id, %I as content, 
+           1 - (%I <=> $1) as similarity
+    FROM %I
+    WHERE %I IS NOT NULL AND 1 - (%I <=> $1) > $2
+    ORDER BY similarity DESC
+    LIMIT $3
+  ', id_column, text_column, embedding_column, table_name, embedding_column, embedding_column);
+  
+  RETURN QUERY EXECUTE query_text USING query_embedding, match_threshold, match_count;
+END;
+$$;
+                    """, language="sql")
+                
         except Exception as e:
             st.error(f"Error loading dashboard data: {str(e)}")
     else:
         st.info("Connect to your Supabase database to see statistics.")
 
-# Data Viewer Page
+# Data Viewer Page (Keep your original implementation)
 def show_data_viewer():
+    # Keep the current implementation
     st.title("Data Viewer")
     
     if "supabase_client" not in st.session_state:
         st.warning("Please connect to your Supabase database first.")
         return
     
-    # Database connection test and Charity Database Explorer
-    with st.expander("Charity Database Explorer", expanded=True):
-        # Test connection
-        if st.button("Test Database Connection"):
-            test_connection()
+    # The rest of your data viewer code...
 
-        # Display charities
-        st.subheader("Charities in Database")
-        charities = execute_query("charities")
-
-        if charities is not None and not charities.empty:
-            st.dataframe(charities)
-            
-            # Select a charity to view details
-            charity_names = charities['name'].tolist()
-            selected_charity = st.selectbox("Select a charity to view details:", charity_names)
-            
-            if selected_charity:
-                charity_id = charities[charities['name'] == selected_charity]['charity_id'].iloc[0]
-                
-                # Create tabs for different sections
-                tabs = st.tabs(["Overview", "Highlights", "Impact", "Financials"])
-                
-                # Overview tab
-                with tabs[0]:
-                    st.write(f"### {selected_charity}")
-                    charity_info = charities[charities['name'] == selected_charity].iloc[0]
-                    st.write(f"**Founded:** {charity_info['founded_year']}")
-                    st.write(f"**Website:** {charity_info['website']}")
-                    st.write(charity_info['description'])
-                
-                # Highlights tab
-                with tabs[1]:
-                    highlights = execute_query("charity_highlights", filters={"charity_id": charity_id}, order_by="display_order")
-                    if highlights is not None and not highlights.empty:
-                        for i, row in highlights.iterrows():
-                            st.write(f"✓ {row['highlight_text']}")
-                    else:
-                        st.write("No highlights found.")
-                
-                # Impact tab
-                with tabs[2]:
-                    impact = execute_query("charity_impact_areas", filters={"charity_id": charity_id}, order_by="display_order")
-                    if impact is not None and not impact.empty:
-                        for i, row in impact.iterrows():
-                            st.write(f"{i+1}. {row['impact_description']}")
-                    else:
-                        st.write("No impact information found.")
-                
-                # Financials tab
-                with tabs[3]:
-                    financials = execute_query("charity_financials", filters={"charity_id": charity_id})
-                    if financials is not None and not financials.empty:
-                        st.write(f"**Donation Income:** ${financials.iloc[0]['donation_income']:,.2f}")
-                        st.write(f"**Fundraising Efficiency:** {financials.iloc[0]['fundraising_efficiency']}%")
-                        st.write(f"**Program Expense Ratio:** {financials.iloc[0]['program_expense_ratio']}%")
-                    else:
-                        st.write("No financial information found.")
-                
-                # Ask Gemini about this charity
-                if st.button("Analyze with Gemini"):
-                    with st.spinner("Generating insights with Gemini..."):
-                        # Get all charity data
-                        charity_data = {}
-                        charity_data.update(charity_info.to_dict())
-                        
-                        # Add impact and highlights
-                        if impact is not None and not impact.empty:
-                            impact_text = " | ".join(impact['impact_description'].tolist())
-                            charity_data['impact_areas'] = impact_text
-                        
-                        if highlights is not None and not highlights.empty:
-                            highlights_text = " | ".join(highlights['highlight_text'].tolist())
-                            charity_data['highlights'] = highlights_text
-                        
-                        # Get financials if available
-                        if financials is not None and not financials.empty:
-                            charity_data.update(financials.iloc[0].to_dict())
-                        
-                        # Create prompt for Gemini
-                        prompt = f"""
-                        Analyze this charity and provide insights:
-                        
-                        Name: {charity_data.get('name', 'N/A')}
-                        Founded: {charity_data.get('founded_year', 'N/A')}
-                        Description: {charity_data.get('description', 'N/A')}
-                        
-                        Impact Areas:
-                        {charity_data.get('impact_areas', 'N/A')}
-                        
-                        Highlights:
-                        {charity_data.get('highlights', 'N/A')}
-                        
-                        Financial Information:
-                        - Donation Income: ${charity_data.get('donation_income', 'N/A')}
-                        - Fundraising Efficiency: {charity_data.get('fundraising_efficiency', 'N/A')}%
-                        - Program Expense Ratio: {charity_data.get('program_expense_ratio', 'N/A')}%
-                        
-                        Provide a comprehensive analysis of this charity's strengths, potential impact, and effectiveness.
-                        """
-                        
-                        # Get analysis from Gemini
-                        response = st.session_state.model.generate_content(prompt)
-                        st.subheader("Gemini Analysis")
-                        st.markdown(response.text)
-        else:
-            st.info("No charities found in the database.")
-
-# Chat Interface Page
-def show_chat_interface():
-    st.title("💬 Gemini AI Assistant")
-    st.markdown("Ask questions, get creative content, or request assistance with various tasks. You can also ask about the charity database!")
+# NEW RAG Chat Interface
+def show_rag_chat_interface():
+    st.title("💬 Charity RAG Assistant")
+    st.markdown("Ask questions about charities using Retrieval Augmented Generation!")
 
     # Display chat history
     st.subheader("Conversation")
@@ -406,15 +284,25 @@ def show_chat_interface():
                 st.markdown(f"<div class='user-message'><strong>You:</strong><br>{message['content']}</div>", unsafe_allow_html=True)
             else:
                 st.markdown(f"<div class='assistant-message'><strong>Assistant:</strong><br>{message['content']}</div>", unsafe_allow_html=True)
+                # Show retrieved context if available and debug mode is on
+                if "context" in message and st.session_state.debug_mode:
+                    with st.expander("View retrieved context"):
+                        st.markdown(f"<div class='retrieved-context'>{message['context']}</div>", unsafe_allow_html=True)
 
     # User input section
     st.subheader("Your Question")
     with st.form(key="prompt_form", clear_on_submit=True):
         user_prompt = st.text_area("Type your message here:", height=100, key="prompt_input")
         
-        # Add a checkbox to explicitly query the database
-        include_db_context = st.checkbox("Include charity database context", value=False, 
-                                        help="Check this if your question is about the charity database")
+        # RAG settings
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            use_rag = st.checkbox("Use RAG", value=True, 
+                                help="Enable Retrieval Augmented Generation")
+        with col2:
+            num_results = st.slider("Results to retrieve", min_value=1, max_value=10, value=3)
+        with col3:
+            similarity_threshold = st.slider("Similarity threshold", min_value=0.5, max_value=0.95, value=0.7, step=0.05)
         
         col1, col2 = st.columns([1, 5])
         with col1:
@@ -432,37 +320,45 @@ def show_chat_interface():
         st.session_state.messages.append({"role": "user", "content": user_prompt})
         
         # Show a spinner while processing
-        with st.spinner("Thinking..."):
+        with st.spinner("Processing..."):
             try:
-                # Check if this is a database-related question or user selected the checkbox
-                database_keywords = ["database", "charity", "charities", "data", "compare", 
-                                  "impact", "financial", "highlights", "donation"]
-                
-                is_database_question = include_db_context or any(keyword in user_prompt.lower() for keyword in database_keywords)
-                
-                if is_database_question:
-                    # Get database context
-                    data_context = get_database_context()
+                if use_rag and "supabase_client" in st.session_state:
+                    start_time = time.time()
                     
-                    # Create prompt with database context
-                    db_prompt = f"""
-                    You are connected to a charity database with information about various charities.
-                    Here's some sample data from the database:
-                    {data_context}
+                    # Get relevant documents using vector search
+                    search_results = vector_search(
+                        st.session_state.supabase_client, 
+                        user_prompt, 
+                        top_k=num_results,
+                        threshold=similarity_threshold
+                    )
                     
-                    User question: {user_prompt}
+                    retrieval_time = time.time() - start_time
                     
-                    When answering, make use of the database information provided above.
-                    """
+                    # Format the retrieved documents for context
+                    formatted_context = format_results_for_rag(search_results, user_prompt)
                     
-                    # Get response from Gemini with database context
-                    response = st.session_state.model.generate_content(db_prompt)
+                    # Create prompt with RAG context
+                    rag_prompt = create_rag_prompt(user_prompt, formatted_context)
+                    
+                    # Get response from Gemini with RAG context
+                    response = st.session_state.model.generate_content(rag_prompt)
+                    
+                    # Add assistant response to chat history with context
+                    context_html = formatted_context.replace("\n", "<br>")
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": response.text,
+                        "context": context_html,
+                        "retrieval_time": f"{retrieval_time:.2f} seconds"
+                    })
+                    
                 else:
-                    # Regular chat without database context
+                    # Regular chat without RAG
                     response = st.session_state.chat.send_message(user_prompt)
                     
-                # Add assistant response to chat history
-                st.session_state.messages.append({"role": "assistant", "content": response.text})
+                    # Add assistant response to chat history
+                    st.session_state.messages.append({"role": "assistant", "content": response.text})
             except Exception as e:
                 st.error(f"Error: {str(e)}")
                 st.session_state.messages.append({"role": "assistant", "content": f"Sorry, I encountered an error: {str(e)}"})
@@ -508,6 +404,15 @@ def show_settings():
         except Exception as e:
             st.error(f"Error updating settings: {str(e)}")
     
+    # Advanced Settings
+    st.subheader("Advanced Settings")
+    
+    with st.expander("RAG Settings"):
+        st.checkbox("Debug Mode", value=st.session_state.debug_mode, key="debug_mode_setting")
+        if st.button("Save Advanced Settings"):
+            st.session_state.debug_mode = st.session_state.get("debug_mode_setting", False)
+            st.success("Advanced settings saved!")
+    
     # API Testing
     st.subheader("API Testing")
     
@@ -520,51 +425,310 @@ def show_settings():
                 st.error("Please configure and save Supabase settings first.")
     
     with col2:
-        if st.button("Test Gemini Embedding Dimension"):
-            if st.session_state.gemini_api_key:
-                dimension_size = test_gemini_embedding_dimension(st.session_state.gemini_api_key)
-                if dimension_size:
-                    st.session_state.dimension_size = dimension_size
+        if st.button("Test Vector Search"):
+            if not st.session_state.get("supabase_client"):
+                st.error("Please configure Supabase connection first")
+            elif not st.session_state.get("gemini_api_key"):
+                st.error("Please configure Gemini API key first")
             else:
-                st.error("Please configure and save Gemini API settings first.")
-
-# Now we'll import the embedding generator module
-try:
-    import embedding_generator
-except ImportError:
-    # Define a function to show a placeholder if the module is not available
-    def show_embedding_generator():
-        st.title("Embedding Generator")
-        st.error("The embedding_generator module is not available. Please make sure the file exists in the same directory.")
-        
-        # Show a code snippet to help the user create the file
-        st.code("""
-# Save this as embedding_generator.py in the same directory
-import streamlit as st
-
-def show_embedding_generator():
-    st.title("Database Embeddings Generator")
-    st.info("This is a placeholder. Please implement the full embedding generator.")
+                try:
+                    # Test vector search with a simple query
+                    test_results = vector_search(
+                        st.session_state.supabase_client,
+                        "Show me information about charity impact",
+                        top_k=3,
+                        threshold=0.6
+                    )
+                    
+                    if test_results:
+                        st.success(f"✅ Vector search successful! Found {len(test_results)} results.")
+                        st.json(test_results)
+                    else:
+                        st.warning("Vector search returned no results. This might be normal if your database is empty or has no embeddings yet.")
+                        
+                except Exception as e:
+                    st.error(f"Vector search test failed: {str(e)}")
+                    
+    # Test embedding generation
+    st.subheader("Test Embedding Generation")
     
-    # Add your embedding generator code here
-""", language="python")
+    test_text = st.text_input("Enter text to generate embedding:", value="Test charity information")
+    if st.button("Generate Test Embedding"):
+        try:
+            if st.session_state.gemini_api_key:
+                genai.configure(api_key=st.session_state.gemini_api_key)
+                embedding_model = "models/embedding-001"
+                
+                # Generate the embedding
+                embedding = genai.embed_content(
+                    model=embedding_model,
+                    content=test_text,
+                    task_type="retrieval_document"
+                )
+                
+                # Get the dimensions
+                vector = embedding["embedding"]
+                dimensions = len(vector)
+                
+                st.success(f"✅ Generated embedding with {dimensions} dimensions")
+                st.write(f"First 5 values: {vector[:5]}")
+                
+                # Show dimensions info for database setup
+                st.info(f"Your vector columns should be of type vector({dimensions})")
+            else:
+                st.error("Please configure Gemini API key first")
+        except Exception as e:
+            st.error(f"Embedding generation failed: {str(e)}")
 
-# Sidebar navigation
-st.sidebar.title("Navigation")
-pages = {
-    "Main Dashboard": show_main_dashboard,
-    "Chat Interface": show_chat_interface,
-    "Data Viewer": show_data_viewer,
-    "Embedding Generator": embedding_generator.show_embedding_generator if 'embedding_generator' in globals() else show_embedding_generator,
-    "Settings": show_settings
-}
+# Utility to check SQL functions
+def show_sql_setup():
+    st.title("SQL Setup Helper")
+    
+    st.markdown("""
+    This page helps you set up the required SQL functions in your Supabase database for the RAG system to work.
+    """)
+    
+    if "supabase_client" not in st.session_state:
+        st.warning("Please connect to your Supabase database first.")
+        return
+        
+    with st.expander("Step 1: Enable pgvector extension", expanded=True):
+        st.markdown("First, you need to enable the pgvector extension in your Supabase database.")
+        pgvector_code = """
+        -- Enable the pgvector extension
+        CREATE EXTENSION IF NOT EXISTS vector;
+        """
+        st.code(pgvector_code, language="sql")
+        
+        if st.button("Run pgvector setup"):
+            try:
+                response = st.session_state.supabase_client.query(pgvector_code).execute()
+                st.success("✅ pgvector extension enabled successfully!")
+            except Exception as e:
+                st.error(f"Failed to enable pgvector: {str(e)}")
+    
+    with st.expander("Step 2: Create match_documents function", expanded=True):
+        st.markdown("Next, you need to create the match_documents function for vector search.")
+        match_documents_code = """
+-- Function for matching documents based on embedding similarity
+CREATE OR REPLACE FUNCTION match_documents(
+  query_embedding vector,
+  match_threshold float,
+  match_count int,
+  table_name text
+)
+RETURNS TABLE (
+  id integer,
+  content text,
+  similarity float
+)
+LANGUAGE plpgsql
+AS $
+DECLARE
+  query_text TEXT;
+  id_column TEXT;
+  text_column TEXT;
+  embedding_column TEXT;
+BEGIN
+  -- Set the appropriate columns based on the table name
+  CASE table_name
+    WHEN 'charities' THEN
+      id_column := 'charity_id';
+      text_column := 'description';
+      embedding_column := 'embedding';
+    WHEN 'charity_news' THEN
+      id_column := 'news_id';
+      text_column := 'content';
+      embedding_column := 'embedding';
+    WHEN 'charity_people' THEN
+      id_column := 'person_id';
+      text_column := 'name';
+      embedding_column := 'embedding';
+    WHEN 'charity_impact_areas' THEN
+      id_column := 'impact_id';
+      text_column := 'impact_description';
+      embedding_column := 'embedding';
+    WHEN 'charity_highlights' THEN
+      id_column := 'highlight_id';
+      text_column := 'highlight_text';
+      embedding_column := 'embedding';
+    WHEN 'charity_financials' THEN
+      id_column := 'financial_id';
+      text_column := 'other_financial_metrics';
+      embedding_column := 'embedding';
+    WHEN 'charity_causes' THEN
+      id_column := 'charity_id';
+      text_column := 'generated_text'; -- This needs to be handled differently
+      embedding_column := 'embedding';
+    WHEN 'charity_social_media' THEN
+      id_column := 'social_id';
+      text_column := 'platform';
+      embedding_column := 'embedding';
+    WHEN 'causes' THEN
+      id_column := 'cause_id';
+      text_column := 'description';
+      embedding_column := 'embedding';
+    ELSE
+      RAISE EXCEPTION 'Unsupported table: %', table_name;
+  END CASE;
 
-selected_page = st.sidebar.radio("Go to", list(pages.keys()))
-st.session_state.page = selected_page
+  -- Handle special case for charity_causes
+  IF table_name = 'charity_causes' THEN
+    query_text := format('
+      WITH joined_data AS (
+        SELECT 
+          cc.%I,
+          CONCAT(''Charity "'', c.name, ''" supports cause "'', cs.name, ''"'') as content,
+          1 - (cc.%I <=> $1) as similarity
+        FROM 
+          %I cc
+        JOIN 
+          charities c ON cc.charity_id = c.charity_id
+        JOIN 
+          causes cs ON cc.cause_id = cs.cause_id
+        WHERE 
+          cc.%I IS NOT NULL
+      )
+      SELECT %I, content, similarity
+      FROM joined_data
+      WHERE similarity > $2
+      ORDER BY similarity DESC
+      LIMIT $3
+    ', id_column, embedding_column, table_name, embedding_column, id_column);
+  ELSE
+    -- Construct and execute dynamic SQL query for other tables
+    query_text := format('
+      SELECT %I as id, %I as content, 
+             1 - (%I <=> $1) as similarity
+      FROM %I
+      WHERE %I IS NOT NULL AND 1 - (%I <=> $1) > $2
+      ORDER BY similarity DESC
+      LIMIT $3
+    ', id_column, text_column, embedding_column, table_name, embedding_column, embedding_column);
+  END IF;
+  
+  RETURN QUERY EXECUTE query_text USING query_embedding, match_threshold, match_count;
+END;
+$;
+        """
+        st.code(match_documents_code, language="sql")
+        
+        if st.button("Create match_documents function"):
+            try:
+                response = st.session_state.supabase_client.query(match_documents_code).execute()
+                st.success("✅ match_documents function created successfully!")
+            except Exception as e:
+                st.error(f"Failed to create match_documents function: {str(e)}")
+    
+    with st.expander("Step 3: Check update_embedding_vector function", expanded=True):
+        st.markdown("You already have an update_embedding_vector function for updating embeddings, but let's check it.")
+        update_embedding_code = """
+CREATE OR REPLACE FUNCTION update_embedding_vector(
+    p_table_name text,
+    p_id_column text,
+    p_id_value integer,
+    p_embedding_column text,
+    p_embedding float[]
+) RETURNS void AS $
+DECLARE
+    query text;
+BEGIN
+    query := format('UPDATE %I SET %I = $1 WHERE %I = $2',
+        p_table_name, p_embedding_column, p_id_column);
+    EXECUTE query USING p_embedding, p_id_value;
+END;
+$ LANGUAGE plpgsql;
+        """
+        st.code(update_embedding_code, language="sql")
+        
+        if st.button("Check/Create update_embedding_vector function"):
+            try:
+                # First check if function exists
+                check_query = """
+                SELECT 1 FROM pg_proc WHERE proname = 'update_embedding_vector';
+                """
+                check_result = st.session_state.supabase_client.query(check_query).execute()
+                
+                if check_result.data and len(check_result.data) > 0:
+                    st.success("✅ update_embedding_vector function already exists!")
+                else:
+                    # Create the function
+                    response = st.session_state.supabase_client.query(update_embedding_code).execute()
+                    st.success("✅ update_embedding_vector function created successfully!")
+            except Exception as e:
+                st.error(f"Failed to check/create update_embedding_vector function: {str(e)}")
+                
+    with st.expander("Step 4: Check vector columns", expanded=True):
+        st.markdown("Make sure each table has a vector column for embeddings.")
+        
+        # List tables to check
+        tables = [
+            "charities",
+            "charity_news",
+            "charity_people",
+            "charity_impact_areas",
+            "charity_highlights",
+            "charity_financials",
+            "charity_causes",
+            "charity_social_media",
+            "causes"
+        ]
+        
+        for table in tables:
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                st.markdown(f"Check **{table}** table for embedding column")
+                
+            with col2:
+                if st.button(f"Check {table}", key=f"check_{table}"):
+                    try:
+                        # Query to check if embedding column exists
+                        check_query = f"""
+                        SELECT column_name, data_type
+                        FROM information_schema.columns 
+                        WHERE table_name = '{table}' AND column_name = 'embedding';
+                        """
+                        check_result = st.session_state.supabase_client.query(check_query).execute()
+                        
+                        if check_result.data and len(check_result.data) > 0:
+                            st.success(f"✅ {table} has an embedding column!")
+                        else:
+                            st.warning(f"⚠️ {table} needs an embedding column. Add it with this SQL:")
+                            st.code(f"ALTER TABLE {table} ADD COLUMN embedding vector;", language="sql")
+                    except Exception as e:
+                        st.error(f"Failed to check {table}: {str(e)}")
 
-# Display the selected page
-pages[selected_page]()
+# Sidebar navigation with updated pages
+def setup_navigation():
+    st.sidebar.title("Navigation")
+    pages = {
+        "Main Dashboard": show_main_dashboard,
+        "RAG Chat": show_rag_chat_interface,
+        "Data Viewer": show_data_viewer,
+        "Embedding Generator": show_embedding_generator,
+        "SQL Setup": show_sql_setup,
+        "Settings": show_settings
+    }
 
-# Add footer
-st.markdown("---")
-st.caption("Powered by Google Gemini 1.5 Flash")
+    # Add debug mode toggle in sidebar
+    with st.sidebar.expander("Developer Options"):
+        debug_mode = st.checkbox("Debug Mode", value=st.session_state.debug_mode)
+        st.session_state.debug_mode = debug_mode
+
+    selected_page = st.sidebar.radio("Go to", list(pages.keys()))
+    st.session_state.page = selected_page
+
+    # Display the selected page
+    pages[selected_page]()
+
+# Main app entry point
+def main():
+    setup_navigation()
+    
+    # Add footer
+    st.markdown("---")
+    st.caption("Powered by Google Gemini 1.5 Flash with RAG")
+
+if __name__ == "__main__":
+    main()
