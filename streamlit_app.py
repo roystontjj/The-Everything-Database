@@ -732,3 +732,234 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+def show_sql_setup():
+    st.title("SQL Setup Helper")
+    
+    st.markdown("""
+    This page helps you set up the required SQL functions in your Supabase database for the RAG system to work.
+    """)
+    
+    if "supabase_client" not in st.session_state:
+        st.warning("Please connect to your Supabase database first.")
+        return
+        
+    with st.expander("Step 1: Enable pgvector extension", expanded=True):
+        st.markdown("First, you need to enable the pgvector extension in your Supabase database.")
+        pgvector_code = """
+        -- Enable the pgvector extension
+        CREATE EXTENSION IF NOT EXISTS vector;
+        """
+        st.code(pgvector_code, language="sql")
+        
+        if st.button("Run pgvector setup"):
+            try:
+                # Use rpc instead of direct query
+                response = st.session_state.supabase_client.rpc(
+                    'exec_sql', 
+                    {'sql_statement': 'CREATE EXTENSION IF NOT EXISTS vector;'}
+                ).execute()
+                st.success("✅ pgvector extension enabled successfully!")
+            except Exception as e:
+                st.error(f"Failed to enable pgvector: {str(e)}")
+                st.info("Alternative approach: Use the Supabase SQL Editor in your dashboard to run this command manually.")
+    
+    with st.expander("Step 2: Create match_documents function", expanded=True):
+        st.markdown("Next, you need to create the match_documents function for vector search.")
+        match_documents_code = """
+-- Function for matching documents based on embedding similarity
+CREATE OR REPLACE FUNCTION match_documents(
+  query_embedding vector,
+  match_threshold float,
+  match_count int,
+  table_name text
+)
+RETURNS TABLE (
+  id integer,
+  content text,
+  similarity float
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  query_text TEXT;
+  id_column TEXT;
+  text_column TEXT;
+  embedding_column TEXT;
+BEGIN
+  -- Set the appropriate columns based on the table name
+  CASE table_name
+    WHEN 'charities' THEN
+      id_column := 'charity_id';
+      text_column := 'description';
+      embedding_column := 'embedding';
+    WHEN 'charity_news' THEN
+      id_column := 'news_id';
+      text_column := 'content';
+      embedding_column := 'embedding';
+    WHEN 'charity_people' THEN
+      id_column := 'person_id';
+      text_column := 'name';
+      embedding_column := 'embedding';
+    WHEN 'charity_impact_areas' THEN
+      id_column := 'impact_id';
+      text_column := 'impact_description';
+      embedding_column := 'embedding';
+    WHEN 'charity_highlights' THEN
+      id_column := 'highlight_id';
+      text_column := 'highlight_text';
+      embedding_column := 'embedding';
+    WHEN 'charity_financials' THEN
+      id_column := 'financial_id';
+      text_column := 'other_financial_metrics';
+      embedding_column := 'embedding';
+    WHEN 'charity_causes' THEN
+      id_column := 'charity_id';
+      text_column := 'generated_text'; -- This needs to be handled differently
+      embedding_column := 'embedding';
+    WHEN 'charity_social_media' THEN
+      id_column := 'social_id';
+      text_column := 'platform';
+      embedding_column := 'embedding';
+    WHEN 'causes' THEN
+      id_column := 'cause_id';
+      text_column := 'description';
+      embedding_column := 'embedding';
+    ELSE
+      RAISE EXCEPTION 'Unsupported table: %', table_name;
+  END CASE;
+
+  -- Handle special case for charity_causes
+  IF table_name = 'charity_causes' THEN
+    query_text := format('
+      WITH joined_data AS (
+        SELECT 
+          cc.%I,
+          CONCAT(''Charity "'', c.name, ''" supports cause "'', cs.name, ''"'') as content,
+          1 - (cc.%I <=> $1) as similarity
+        FROM 
+          %I cc
+        JOIN 
+          charities c ON cc.charity_id = c.charity_id
+        JOIN 
+          causes cs ON cc.cause_id = cs.cause_id
+        WHERE 
+          cc.%I IS NOT NULL
+      )
+      SELECT %I, content, similarity
+      FROM joined_data
+      WHERE similarity > $2
+      ORDER BY similarity DESC
+      LIMIT $3
+    ', id_column, embedding_column, table_name, embedding_column, id_column);
+  ELSE
+    -- Construct and execute dynamic SQL query for other tables
+    query_text := format('
+      SELECT %I as id, %I as content, 
+             1 - (%I <=> $1) as similarity
+      FROM %I
+      WHERE %I IS NOT NULL AND 1 - (%I <=> $1) > $2
+      ORDER BY similarity DESC
+      LIMIT $3
+    ', id_column, text_column, embedding_column, table_name, embedding_column, embedding_column);
+  END IF;
+  
+  RETURN QUERY EXECUTE query_text USING query_embedding, match_threshold, match_count;
+END;
+$$;
+        """
+        st.code(match_documents_code, language="sql")
+        
+        st.info("⚠️ Due to the complexity of this function, you'll need to create it directly in Supabase's SQL Editor.")
+        
+        if st.button("Copy SQL to clipboard"):
+            # This is a client-side operation, so we'll use JavaScript
+            st.markdown(
+                f"""
+                <textarea id="sql-code" style="position: absolute; left: -9999px;">{match_documents_code}</textarea>
+                <script>
+                    const copyToClipboard = () => {{
+                        const text = document.getElementById('sql-code').value;
+                        navigator.clipboard.writeText(text)
+                            .then(() => alert('SQL code copied to clipboard!'))
+                            .catch(err => alert('Failed to copy: ' + err));
+                    }};
+                    copyToClipboard();
+                </script>
+                """,
+                unsafe_allow_html=True
+            )
+            st.success("SQL code copied! Now paste and run it in your Supabase SQL Editor")
+            
+        st.markdown("""
+        ### Manual Instructions:
+        1. Go to your [Supabase Dashboard](https://app.supabase.io)
+        2. Select your project
+        3. Go to the SQL Editor
+        4. Paste the code above
+        5. Click "Run" to execute
+        """)
+    
+    with st.expander("Step 3: Check update_embedding_vector function", expanded=True):
+        st.markdown("You already have an update_embedding_vector function for updating embeddings, but let's check it.")
+        update_embedding_code = """
+CREATE OR REPLACE FUNCTION update_embedding_vector(
+    p_table_name text,
+    p_id_column text,
+    p_id_value integer,
+    p_embedding_column text,
+    p_embedding float[]
+) RETURNS void AS $$
+DECLARE
+    query text;
+BEGIN
+    query := format('UPDATE %I SET %I = $1 WHERE %I = $2',
+        p_table_name, p_embedding_column, p_id_column);
+    EXECUTE query USING p_embedding, p_id_value;
+END;
+$$ LANGUAGE plpgsql;
+        """
+        st.code(update_embedding_code, language="sql")
+        
+        st.info("Since you already have this function, you don't need to recreate it.")
+                
+    with st.expander("Step 4: Check vector columns", expanded=True):
+        st.markdown("Make sure each table has a vector column for embeddings.")
+        
+        # List tables to check
+        tables = [
+            "charities",
+            "charity_news",
+            "charity_people",
+            "charity_impact_areas",
+            "charity_highlights",
+            "charity_financials",
+            "charity_causes",
+            "charity_social_media",
+            "causes"
+        ]
+        
+        # Alternative approach using Supabase select
+        for table in tables:
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                st.markdown(f"Check **{table}** table for embedding column")
+                
+            with col2:
+                if st.button(f"Check {table}", key=f"check_{table}"):
+                    try:
+                        # Use select query instead of raw SQL
+                        result = st.session_state.supabase_client.table("information_schema.columns") \
+                            .select("column_name", "data_type") \
+                            .eq("table_name", table) \
+                            .eq("column_name", "embedding") \
+                            .execute()
+                        
+                        if result.data and len(result.data) > 0:
+                            st.success(f"✅ {table} has an embedding column!")
+                        else:
+                            st.warning(f"⚠️ {table} needs an embedding column. Add it with this SQL:")
+                            st.code(f"ALTER TABLE {table} ADD COLUMN embedding vector;", language="sql")
+                    except Exception as e:
+                        st.error(f"Failed to check {table}: {str(e)}")
