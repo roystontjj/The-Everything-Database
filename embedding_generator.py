@@ -1,443 +1,409 @@
 import streamlit as st
 import pandas as pd
-import json
-import time
-from supabase import create_client
 import google.generativeai as genai
-from typing import List, Dict, Any, Tuple
+import time
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
+import traceback
 
-# Database schema
-TABLE_CONFIGS = [
-    {
-        "name": "charities",
-        "text_column": "description",
-        "id_column": "charity_id",
-        "embedding_column": "embedding"
-    },
-    {
-        "name": "charity_news",
-        "text_column": "content",
-        "id_column": "news_id",
-        "embedding_column": "embedding"
-    },
-    {
-        "name": "charity_people",
-        "text_column": "name",
-        "id_column": "person_id",
-        "embedding_column": "embedding"
-    },
-    {
-        "name": "charity_impact_areas",
-        "text_column": "impact_description",
-        "id_column": "impact_id",
-        "embedding_column": "embedding"
-    },
-    {
-        "name": "charity_highlights",
-        "text_column": "highlight_text",
-        "id_column": "highlight_id",
-        "embedding_column": "embedding"
-    },
-    {
-        "name": "charity_financials",
-        "text_column": "other_financial_metrics",
-        "id_column": "financial_id",
-        "embedding_column": "embedding"
-    },
-    {
-        "name": "charity_causes",
-        "text_column": None,  # This needs special handling as it doesn't have a clear text column
-        "id_column": "charity_id",
-        "embedding_column": "embedding"
-    },
-    {
-        "name": "charity_social_media",
-        "text_column": "platform",
-        "id_column": "social_id",
-        "embedding_column": "embedding"
-    },
-    {
-        "name": "causes",
-        "text_column": "description",
-        "id_column": "cause_id",
-        "embedding_column": "embedding"
-    }
-]
-
-def log_with_timestamp(message):
-    """Add a timestamped log message"""
-    timestamp = time.strftime("%H:%M:%S", time.localtime())
-    log_msg = f"[{timestamp}] {message}"
-    st.session_state.logs.append(log_msg)
-    return log_msg
-
-def connect_to_supabase():
-    """Establish connection to Supabase"""
-    try:
-        client = create_client(st.session_state.supabase_url, st.session_state.supabase_key)
-        return client
-    except Exception as e:
-        error_msg = f"Failed to connect to Supabase: {str(e)}"
-        st.error(error_msg)
-        log_with_timestamp(error_msg)
-        return None
-
-def initialize_gemini_api():
-    """Initialize the Gemini API client"""
-    try:
-        # Try to get API key from Streamlit secrets
-        try:
-            api_key = st.secrets["GEMINI_API_KEY"]
-        except:
-            # If not in secrets, get from session state
-            api_key = st.session_state.gemini_api_key
-            
-        genai.configure(api_key=api_key)
-        embedding_model = "models/embedding-001"
-        return embedding_model
-    except Exception as e:
-        error_msg = f"Failed to initialize Gemini API: {str(e)}"
-        st.error(error_msg)
-        log_with_timestamp(error_msg)
-        return None
-
-def get_records_without_embeddings(supabase, table_config, limit=50) -> pd.DataFrame:
-    """Fetch records that have empty embeddings"""
-    try:
-        log_with_timestamp(f"Fetching records with NULL embeddings from {table_config['name']}")
-        
-        result = supabase.table(table_config["name"]) \
-            .select(f"{table_config['id_column']}, {table_config['text_column'] if table_config['text_column'] else '*'}") \
-            .is_(table_config["embedding_column"], "null") \
-            .limit(limit) \
-            .execute()
-        
-        log_with_timestamp(f"Found {len(result.data)} records with NULL embeddings in {table_config['name']}")
-        
-        # Handle the case for charity_causes which requires joining with other tables
-        if table_config["name"] == "charity_causes" and len(result.data) > 0:
-            # For charity_causes, we'll need to join with charities and causes tables
-            # to create meaningful text for embeddings
-            enriched_data = []
-            for row in result.data:
-                charity_id = row["charity_id"]
-                cause_id = row["cause_id"]
-                
-                # Get charity name
-                charity_result = supabase.table("charities") \
-                    .select("name") \
-                    .eq("charity_id", charity_id) \
-                    .execute()
-                
-                # Get cause name
-                cause_result = supabase.table("causes") \
-                    .select("name") \
-                    .eq("cause_id", cause_id) \
-                    .execute()
-                
-                if charity_result.data and cause_result.data:
-                    charity_name = charity_result.data[0]["name"]
-                    cause_name = cause_result.data[0]["name"]
-                    row["generated_text"] = f"Charity '{charity_name}' supports the cause '{cause_name}'"
-                    enriched_data.append(row)
-            
-            return pd.DataFrame(enriched_data)
-        
-        return pd.DataFrame(result.data)
-    except Exception as e:
-        error_msg = f"Error fetching records from {table_config['name']}: {str(e)}"
-        st.error(error_msg)
-        log_with_timestamp(error_msg)
-        return pd.DataFrame()
-
-def generate_embedding(text: str, model: str):
-    """Generate embedding using Gemini API"""
-    try:
-        if not text or text.strip() == "":
-            log_with_timestamp("Cannot generate embedding for empty text")
-            return None
-        
-        log_with_timestamp(f"Generating embedding for text: {text[:50]}...")
-        
-        embedding = genai.embed_content(
-            model=model,
-            content=text,
-            task_type="retrieval_document"
-        )
-        
-        # Return the embedding values as a list
-        vector = embedding["embedding"]
-        log_with_timestamp(f"Generated embedding with {len(vector)} dimensions")
-        return vector
-    except Exception as e:
-        error_msg = f"Error generating embedding: {str(e)}"
-        st.error(error_msg)
-        log_with_timestamp(error_msg)
-        time.sleep(1)  # Add a small delay in case of rate limiting
-        return None
-
-def update_record_with_embedding(supabase, table_name: str, id_column: str, id_value: int, 
-                                embedding_column: str, embedding_vector: List[float]):
-    """Update a record with its new embedding"""
-    try:
-        # Log the embedding details for debugging
-        log_with_timestamp(f"Updating {table_name} record {id_value} with embedding of length {len(embedding_vector)}")
-        
-        # Try the custom SQL function first
-        try:
-            # Use the update_embedding_vector function that was manually created in SQL
-            result = supabase.rpc(
-                'update_embedding_vector',
-                {
-                    'p_table_name': table_name,
-                    'p_id_column': id_column,
-                    'p_id_value': id_value,
-                    'p_embedding_column': embedding_column,
-                    'p_embedding': embedding_vector
-                }
-            ).execute()
-            
-            log_with_timestamp(f"Successfully updated embedding for {table_name} record {id_value} using SQL function")
-            return True
-            
-        except Exception as rpc_error:
-            # Log the error and try the direct method
-            log_with_timestamp(f"RPC error: {str(rpc_error)}. Trying direct update...")
-            
-            # Try direct update as a fallback
-            result = supabase.table(table_name) \
-                .update({embedding_column: embedding_vector}) \
-                .eq(id_column, id_value) \
-                .execute()
-                
-            log_with_timestamp(f"Direct update completed for {table_name} record {id_value}")
-            return True
-            
-    except Exception as e:
-        error_msg = f"Error updating record in {table_name}: {str(e)}"
-        st.error(error_msg)
-        log_with_timestamp(error_msg)
-        # Log more details about the error
-        log_with_timestamp(f"Error type: {type(e).__name__}")
-        log_with_timestamp(f"Vector length: {len(embedding_vector)}")
-        return False
-
-def process_table(supabase, table_config: Dict, embedding_model: str, batch_size: int):
-    """Process a single table to update missing embeddings"""
-    table_name = table_config["name"]
-    id_column = table_config["id_column"]
-    text_column = table_config["text_column"]
-    embedding_column = table_config["embedding_column"]
-    
-    log_with_timestamp(f"Processing table: {table_name}")
-    
-    # Get records without embeddings
-    df = get_records_without_embeddings(supabase, table_config, batch_size)
-    
-    if df.empty:
-        log_with_timestamp(f"No records found with missing embeddings in {table_name}")
-        return 0
-    
-    log_with_timestamp(f"Found {len(df)} records with missing embeddings in {table_name}")
-    
-    updated_count = 0
-    for _, row in df.iterrows():
-        # Get the appropriate text to embed
-        if table_name == "charity_causes":
-            text_to_embed = row.get("generated_text", "")
-        else:
-            text_to_embed = row.get(text_column, "")
-        
-        if not text_to_embed or text_to_embed.strip() == "":
-            log_with_timestamp(f"Skipping {table_name} record with empty text")
-            continue
-            
-        # Generate embedding
-        embedding_vector = generate_embedding(text_to_embed, embedding_model)
-        
-        if embedding_vector:
-            # Update the record
-            id_value = row[id_column]
-            success = update_record_with_embedding(
-                supabase, table_name, id_column, id_value, embedding_column, embedding_vector
-            )
-            
-            if success:
-                updated_count += 1
-                log_with_timestamp(f"Updated embedding for {table_name} record with {id_column}={id_value}")
-            else:
-                log_with_timestamp(f"Failed to update embedding for {table_name} record with {id_column}={id_value}")
-            
-            # Small delay to avoid hitting rate limits
-            time.sleep(0.5)
-    
-    log_with_timestamp(f"Updated {updated_count} records in {table_name}")
-    return updated_count
-
-def run_embedding_update():
-    """Main function to update embeddings for all tables"""
-    if not st.session_state.supabase_url or not st.session_state.supabase_key:
-        st.error("Please provide Supabase URL and API key")
-        return
-    
-    # Check for Gemini API key
-    try:
-        api_key = st.secrets["GEMINI_API_KEY"]
-    except:
-        if not st.session_state.gemini_api_key:
-            st.error("Please provide Gemini API key")
-            return
-    
-    st.session_state.processing = True
-    st.session_state.progress = 0
-    st.session_state.logs = []
-    
-    # Connect to Supabase
-    supabase = connect_to_supabase()
-    if not supabase:
-        st.session_state.processing = False
-        return
-    
-    # Initialize Gemini API
-    embedding_model = initialize_gemini_api()
-    if not embedding_model:
-        st.session_state.processing = False
-        return
-    
-    log_with_timestamp("SQL function should be created manually in SQL Editor. Will use it if available.")
-    
-    total_tables = len(TABLE_CONFIGS)
-    total_updated = 0
-    
-    # Process each table
-    for i, table_config in enumerate(TABLE_CONFIGS):
-        updated_count = process_table(supabase, table_config, embedding_model, st.session_state.batch_size)
-        total_updated += updated_count
-        
-        # Update progress
-        st.session_state.progress = (i + 1) / total_tables
-    
-    log_with_timestamp(f"Completed embedding updates. Updated {total_updated} records in total.")
-    st.session_state.processing = False
+# Import utility functions
+from rag_utils import initialize_gemini_api, generate_embedding
 
 def show_embedding_generator():
-    """Main function to display the embedding generator page"""
+    """
+    Shows the embedding generator interface
+    """
     st.title("Database Embeddings Generator")
     
-    # Initialize session state variables if they don't exist
-    if "processing" not in st.session_state:
-        st.session_state.processing = False
-    if "progress" not in st.session_state:
+    # Check if API keys and client are set up
+    if not st.session_state.get("gemini_api_key") or not st.session_state.get("supabase_client"):
+        st.warning("Please configure your API keys in Settings before proceeding.")
+        return
+    
+    # Initialize embedding model
+    embedding_model = initialize_gemini_api()
+    if not embedding_model:
+        st.error("Failed to initialize embedding model. Please check your API key.")
+        return
+    
+    # Define tables and their configurations
+    TABLE_CONFIGS = {
+        "charities": {
+            "id_column": "charity_id",
+            "text_column": "description", 
+            "embedding_column": "embedding"
+        },
+        "charity_news": {
+            "id_column": "news_id",
+            "text_column": "content",
+            "embedding_column": "embedding"
+        },
+        "charity_people": {
+            "id_column": "person_id",
+            "text_column": "name",
+            "embedding_column": "embedding"
+        },
+        "charity_impact_areas": {
+            "id_column": "impact_id",
+            "text_column": "impact_description",
+            "embedding_column": "embedding"
+        },
+        "charity_highlights": {
+            "id_column": "highlight_id",
+            "text_column": "highlight_text",
+            "embedding_column": "embedding"
+        },
+        "charity_financials": {
+            "id_column": "financial_id",
+            "text_column": "other_financial_metrics",
+            "embedding_column": "embedding"
+        },
+        "charity_causes": {
+            "id_column": "charity_id",
+            "text_column": None,  # Special case, will be handled differently
+            "embedding_column": "embedding"
+        },
+        "charity_social_media": {
+            "id_column": "social_id",
+            "text_column": "platform",
+            "embedding_column": "embedding"
+        },
+        "causes": {
+            "id_column": "cause_id",
+            "text_column": "description",
+            "embedding_column": "embedding"
+        }
+    }
+    
+    # Operation settings
+    st.subheader("Embedding Generation Settings")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        selected_tables = st.multiselect(
+            "Select tables to process",
+            options=list(TABLE_CONFIGS.keys()),
+            default=list(TABLE_CONFIGS.keys())
+        )
+        
+    with col2:
+        batch_size = st.number_input(
+            "Batch size",
+            min_value=1,
+            max_value=50,
+            value=st.session_state.batch_size,
+            help="Number of records to process in one batch"
+        )
+        st.session_state.batch_size = batch_size
+    
+    process_btn = st.button("Generate Embeddings", type="primary", use_container_width=True)
+    
+    # Progress bar
+    progress_bar = st.progress(0)
+    
+    # Display processing logs
+    st.subheader("Processing Logs")
+    logs_placeholder = st.empty()
+    
+    # Display table statistics
+    st.subheader("Table Statistics")
+    stats_placeholder = st.container()
+    
+    # Process tables when button is clicked
+    if process_btn:
+        st.session_state.processing = True
         st.session_state.progress = 0
+        st.session_state.logs = []
+        
+        # Run the processing
+        try:
+            with st.spinner("Processing tables..."):
+                process_tables(
+                    selected_tables, 
+                    TABLE_CONFIGS, 
+                    batch_size,
+                    progress_bar,
+                    logs_placeholder,
+                    stats_placeholder
+                )
+        except Exception as e:
+            log_message(f"Error: {str(e)}", logs_placeholder)
+            if st.session_state.get("debug_mode", False):
+                st.error(traceback.format_exc())
+        finally:
+            st.session_state.processing = False
+            
+    # Always update the table statistics
+    update_table_statistics(TABLE_CONFIGS, stats_placeholder)
+
+
+def process_tables(tables, table_configs, batch_size, progress_bar, logs_placeholder, stats_placeholder):
+    """Process multiple tables and generate embeddings"""
+    total_tables = len(tables)
+    table_counter = 0
+    
+    for table_name in tables:
+        table_counter += 1
+        config = table_configs[table_name]
+        
+        # Update progress
+        progress = (table_counter - 1) / total_tables
+        progress_bar.progress(progress)
+        
+        log_message(f"Processing table: {table_name}", logs_placeholder)
+        
+        # Special handling for charity_causes table
+        if table_name == "charity_causes":
+            process_charity_causes_table(table_name, config, batch_size, logs_placeholder)
+        else:
+            process_regular_table(table_name, config, batch_size, logs_placeholder)
+            
+        # Update statistics
+        update_table_statistics(table_configs, stats_placeholder)
+    
+    # Complete the progress bar
+    progress_bar.progress(1.0)
+    log_message("Embedding generation completed!", logs_placeholder)
+
+
+def process_regular_table(table_name, config, batch_size, logs_placeholder):
+    """Process a regular table to generate embeddings"""
+    try:
+        supabase = st.session_state.supabase_client
+        embedding_model = initialize_gemini_api()
+        
+        # Get column configuration
+        id_column = config["id_column"]
+        text_column = config["text_column"]
+        embedding_column = config["embedding_column"]
+        
+        # Fetch records with NULL embeddings
+        log_message(f"Fetching records with NULL embeddings from {table_name}", logs_placeholder)
+        
+        response = supabase.table(table_name).select(f"{id_column}, {text_column}").is_(embedding_column, "null").execute()
+        null_records = response.data
+        
+        log_message(f"Found {len(null_records)} records with NULL embeddings in {table_name}", logs_placeholder)
+        
+        # Fetch records with missing embeddings
+        missing_records = []
+        try:
+            # Some databases might not distinguish between NULL and missing columns
+            # This might fail if the column doesn't exist or if the SQL query syntax is different
+            response = supabase.table(table_name).select(f"{id_column}, {text_column}").not_.is_(embedding_column, "null").eq(embedding_column, "").execute()
+            missing_records = response.data
+            log_message(f"Found {len(missing_records)} records with missing embeddings in {table_name}", logs_placeholder)
+        except Exception as e:
+            # If this fails, just continue with NULL records
+            log_message(f"Skipping check for empty embeddings: {str(e)}", logs_placeholder)
+        
+        # Combine records to process
+        records_to_process = null_records + missing_records
+        
+        if not records_to_process:
+            log_message(f"No records found with missing embeddings in {table_name}", logs_placeholder)
+            return
+        
+        # Process records in batches
+        total_batches = (len(records_to_process) + batch_size - 1) // batch_size
+        
+        for batch_index in range(total_batches):
+            start_idx = batch_index * batch_size
+            end_idx = min(start_idx + batch_size, len(records_to_process))
+            batch = records_to_process[start_idx:end_idx]
+            
+            log_message(f"Processing batch {batch_index + 1}/{total_batches} ({len(batch)} records)", logs_placeholder)
+            
+            for record in batch:
+                record_id = record[id_column]
+                text = record.get(text_column, "")
+                
+                # Skip records with empty text
+                if not text or text.strip() == "":
+                    log_message(f"Skipping {table_name} record with empty text", logs_placeholder)
+                    continue
+                    
+                # Generate embedding
+                try:
+                    embedding = generate_embedding(text, embedding_model)
+                    
+                    if embedding:
+                        # Update record with embedding
+                        try:
+                            # Use RPC to update embedding
+                            response = supabase.rpc(
+                                'update_embedding_vector',
+                                {
+                                    'p_table_name': table_name,
+                                    'p_id_column': id_column,
+                                    'p_id_value': record_id,
+                                    'p_embedding_column': embedding_column,
+                                    'p_embedding': embedding
+                                }
+                            ).execute()
+                        except Exception as update_error:
+                            # Fall back to direct update if RPC fails
+                            log_message(f"RPC update failed, trying direct update: {str(update_error)}", logs_placeholder)
+                            response = supabase.table(table_name).update({embedding_column: embedding}).eq(id_column, record_id).execute()
+                            
+                except Exception as e:
+                    log_message(f"Error generating embedding for {table_name} record {record_id}: {str(e)}", logs_placeholder)
+                    time.sleep(1)  # Add delay to avoid rate limits
+            
+            # Add a small delay between batches
+            time.sleep(0.5)
+            
+    except Exception as e:
+        log_message(f"Error processing table {table_name}: {str(e)}", logs_placeholder)
+        if st.session_state.get("debug_mode", False):
+            log_message(traceback.format_exc(), logs_placeholder)
+
+
+def process_charity_causes_table(table_name, config, batch_size, logs_placeholder):
+    """Special handling for charity_causes table which needs joined data"""
+    try:
+        supabase = st.session_state.supabase_client
+        embedding_model = initialize_gemini_api()
+        
+        # Get column configuration
+        id_column = config["id_column"]  # This is charity_id
+        embedding_column = config["embedding_column"]
+        
+        # Fetch records with NULL embeddings
+        log_message(f"Fetching records with NULL embeddings from {table_name}", logs_placeholder)
+        
+        # We need to join with charities and causes tables
+        sql_query = f"""
+        SELECT 
+            cc.{id_column}, 
+            cc.cause_id,
+            c.name as charity_name,
+            cs.name as cause_name
+        FROM 
+            {table_name} cc
+        JOIN 
+            charities c ON cc.charity_id = c.charity_id
+        JOIN 
+            causes cs ON cc.cause_id = cs.cause_id
+        WHERE 
+            cc.{embedding_column} IS NULL
+        """
+        
+        response = supabase.query(sql_query).execute()
+        records_to_process = response.data
+        
+        log_message(f"Found {len(records_to_process)} records with NULL embeddings in {table_name}", logs_placeholder)
+        
+        if not records_to_process:
+            log_message(f"No records found with missing embeddings in {table_name}", logs_placeholder)
+            return
+        
+        # Process records in batches
+        total_batches = (len(records_to_process) + batch_size - 1) // batch_size
+        
+        for batch_index in range(total_batches):
+            start_idx = batch_index * batch_size
+            end_idx = min(start_idx + batch_size, len(records_to_process))
+            batch = records_to_process[start_idx:end_idx]
+            
+            log_message(f"Processing batch {batch_index + 1}/{total_batches} ({len(batch)} records)", logs_placeholder)
+            
+            for record in batch:
+                charity_id = record[id_column]
+                cause_id = record["cause_id"]
+                charity_name = record.get("charity_name", "Unknown Charity")
+                cause_name = record.get("cause_name", "Unknown Cause")
+                
+                # Create text for embedding
+                text = f'Charity "{charity_name}" supports cause "{cause_name}"'
+                
+                # Generate embedding
+                try:
+                    embedding = generate_embedding(text, embedding_model)
+                    
+                    if embedding:
+                        # Update record with embedding
+                        try:
+                            # For charity_causes we need a compound WHERE clause
+                            response = supabase.table(table_name).update(
+                                {embedding_column: embedding}
+                            ).eq(id_column, charity_id).eq("cause_id", cause_id).execute()
+                            
+                        except Exception as update_error:
+                            log_message(f"Error updating embedding for {table_name}: {str(update_error)}", logs_placeholder)
+                            
+                except Exception as e:
+                    log_message(f"Error generating embedding for {table_name} record {charity_id}-{cause_id}: {str(e)}", logs_placeholder)
+                    time.sleep(1)  # Add delay to avoid rate limits
+            
+            # Add a small delay between batches
+            time.sleep(0.5)
+            
+    except Exception as e:
+        log_message(f"Error processing charity_causes table: {str(e)}", logs_placeholder)
+        if st.session_state.get("debug_mode", False):
+            log_message(traceback.format_exc(), logs_placeholder)
+
+
+def update_table_statistics(table_configs, placeholder):
+    """Update the table statistics display"""
+    try:
+        supabase = st.session_state.supabase_client
+        
+        with placeholder:
+            stats = {}
+            
+            for table_name, config in table_configs.items():
+                try:
+                    # Get total count
+                    total_response = supabase.table(table_name).select("*", count="exact").execute()
+                    total_count = total_response.count
+                    
+                    # Get count of records with embeddings
+                    embedding_column = config["embedding_column"]
+                    with_embedding_response = supabase.table(table_name).select("*", count="exact").not_.is_(embedding_column, "null").execute()
+                    with_embedding_count = with_embedding_response.count
+                    
+                    # Calculate missing count
+                    missing_count = total_count - with_embedding_count
+                    
+                    # Calculate completion percentage
+                    completion_percentage = (with_embedding_count / total_count * 100) if total_count > 0 else 0
+                    
+                    # Store the statistics
+                    stats[table_name] = {
+                        "total": total_count,
+                        "missing": missing_count,
+                        "completion": f"{completion_percentage:.1f}%"
+                    }
+                except Exception as e:
+                    # If there's an error getting stats for this table, just continue
+                    if st.session_state.get("debug_mode", False):
+                        st.warning(f"Error getting stats for {table_name}: {str(e)}")
+            
+            # Display statistics
+            for table_name, table_stats in stats.items():
+                st.write(f"{table_name}: {table_stats['missing']} missing out of {table_stats['total']} ({table_stats['completion']} complete)")
+    
+    except Exception as e:
+        st.error(f"Error updating statistics: {str(e)}")
+
+
+def log_message(message, placeholder):
+    """Add a log message and update the display"""
+    timestamp = time.strftime("%H:%M:%S")
+    log_entry = f"[{timestamp}] {message}"
+    
+    # Add to session state logs
     if "logs" not in st.session_state:
         st.session_state.logs = []
-    if "supabase_url" not in st.session_state:
-        st.session_state.supabase_url = ""
-    if "supabase_key" not in st.session_state:
-        st.session_state.supabase_key = ""
-    if "gemini_api_key" not in st.session_state:
-        st.session_state.gemini_api_key = ""
-    if "batch_size" not in st.session_state:
-        st.session_state.batch_size = 10
     
-    # Supabase credentials input
-    with st.sidebar:
-        st.header("Database Configuration")
-        st.session_state.supabase_url = st.text_input("Supabase URL", value=st.session_state.supabase_url)
-        st.session_state.supabase_key = st.text_input("Supabase API Key", type="password", value=st.session_state.supabase_key)
-        
-        # Streamlit secrets management for Gemini API
-        try:
-            api_key = st.secrets["GEMINI_API_KEY"]
-            gemini_key_available = True
-            st.success("Gemini API key found in Streamlit secrets.")
-        except:
-            gemini_key_available = False
-            st.warning("Gemini API key not found in Streamlit secrets.")
-            st.session_state.gemini_api_key = st.text_input("Gemini API Key", type="password", value=st.session_state.gemini_api_key)
-        
-        st.session_state.batch_size = st.number_input("Batch Size", min_value=1, max_value=100, value=st.session_state.batch_size)
-        
-        st.markdown("---")
-        st.markdown("""
-        ### How it works
-        This tool scans your Supabase database for records with empty embedding fields 
-        and generates embeddings using the Gemini API.
-        """)
-        
-        with st.expander("Advanced Options"):
-            st.info("""
-            **SQL Function for Vector Updates**
-            
-            For best results, create this function in your Supabase SQL Editor:
-            ```sql
-            CREATE OR REPLACE FUNCTION update_embedding_vector(
-                p_table_name text,
-                p_id_column text,
-                p_id_value integer,
-                p_embedding_column text,
-                p_embedding float[]
-            ) RETURNS void AS $$
-            DECLARE
-                query text;
-            BEGIN
-                query := format('UPDATE %I SET %I = $1 WHERE %I = $2',
-                    p_table_name, p_embedding_column, p_id_column);
-                EXECUTE query USING p_embedding, p_id_value;
-            END;
-            $$ LANGUAGE plpgsql;
-            ```
-            """)
+    st.session_state.logs.append(log_entry)
     
-    # Main app layout
-    col1, col2 = st.columns([2, 1])
+    # Keep only the last 100 log entries
+    if len(st.session_state.logs) > 100:
+        st.session_state.logs = st.session_state.logs[-100:]
     
-    with col1:
-        # Button to start processing
-        if not st.session_state.processing:
-            if st.button("Generate Missing Embeddings", use_container_width=True):
-                run_embedding_update()
-        else:
-            st.button("Processing...", disabled=True, use_container_width=True)
-            st.progress(st.session_state.progress)
-    
-        # Display logs
-        st.subheader("Processing Logs")
-        log_container = st.container(height=400)
-        with log_container:
-            for log in st.session_state.logs:
-                st.text(log)
-    
-    with col2:
-        st.subheader("Table Statistics")
-        
-        # Only show statistics if we have Supabase credentials
-        if st.session_state.supabase_url and st.session_state.supabase_key:
-            supabase = connect_to_supabase()
-            if supabase:
-                stats_container = st.container(height=400)
-                with stats_container:
-                    for table_config in TABLE_CONFIGS:
-                        try:
-                            # Get total count
-                            total_result = supabase.table(table_config["name"]) \
-                                .select(table_config["id_column"], count="exact") \
-                                .execute()
-                            
-                            # Get count of records without embeddings
-                            missing_result = supabase.table(table_config["name"]) \
-                                .select(table_config["id_column"], count="exact") \
-                                .is_(table_config["embedding_column"], "null") \
-                                .execute()
-                            
-                            total_count = total_result.count
-                            missing_count = missing_result.count
-                            
-                            if total_count > 0:
-                                completion_rate = ((total_count - missing_count) / total_count) * 100
-                            else:
-                                completion_rate = 100
-                            
-                            st.markdown(f"**{table_config['name']}**: {missing_count} missing out of {total_count} ({completion_rate:.1f}% complete)")
-                        except Exception as e:
-                            st.markdown(f"**{table_config['name']}**: Error fetching statistics")
+    # Update the display
+    with placeholder:
+        st.code("\n".join(st.session_state.logs))
