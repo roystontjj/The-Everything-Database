@@ -151,26 +151,61 @@ def perform_vector_search(supabase, query_embedding, query_text: str,
                          debug_mode: bool = False):
     """
     Perform vector search across multiple tables using pre-computed embedding
-    
-    Args:
-        supabase: Supabase client instance
-        query_embedding: Pre-computed embedding vector for the query
-        query_text: The original text query (for debugging)
-        top_k: Number of results to return
-        threshold: Similarity threshold
-        debug_mode: Whether to show debugging information
-        
-    Returns:
-        List of search results with table, similarity score, and content
     """
     try:
         if not query_embedding:
             st.warning("No query embedding provided for vector search")
             return []
         
-        # Tables to search
-        tables = [
-            "charities",
+        # First, specifically retrieve all charities with a lower threshold
+        charity_threshold = max(0.5, threshold - 0.2)  # Lower threshold for charities
+        charity_results = []
+        
+        try:
+            # Get all charities first with lower threshold
+            charity_response = supabase.rpc(
+                'match_documents',
+                {
+                    'query_embedding': query_embedding,
+                    'match_threshold': charity_threshold,
+                    'match_count': 10,  # Get all 10 charities
+                    'table_name': 'charities'
+                }
+            ).execute()
+            
+            if debug_mode:
+                st.write(f"Found {len(charity_response.data or [])} charities with threshold {charity_threshold}")
+                
+            # Process charity results
+            if charity_response.data:
+                for item in charity_response.data:
+                    if "id" not in item or "content" not in item or "similarity" not in item:
+                        continue
+                    
+                    charity_info = {
+                        'table': 'charities',
+                        'score': item['similarity'],
+                        'content': item['content'],
+                        'id': item['id'],
+                        'additional_info': {'charity_name': ''}
+                    }
+                    
+                    # Get charity name
+                    try:
+                        name_info = supabase.table("charities").select("name").eq("charity_id", item["id"]).execute()
+                        if name_info.data:
+                            charity_info['additional_info']["charity_name"] = name_info.data[0]["name"]
+                    except Exception as e:
+                        if debug_mode:
+                            st.warning(f"Error getting charity name: {str(e)}")
+                    
+                    charity_results.append(charity_info)
+        except Exception as e:
+            if debug_mode:
+                st.warning(f"Error in charity search: {str(e)}")
+        
+        # Now search other tables with regular threshold
+        other_tables = [
             "charity_news",
             "charity_people",
             "charity_impact_areas",
@@ -181,19 +216,13 @@ def perform_vector_search(supabase, query_embedding, query_text: str,
             "causes"
         ]
         
-        # For debugging
-        if debug_mode:
-            st.write(f"Searching {len(tables)} tables with threshold {threshold}")
+        other_results = []
+        table_stats = {}
         
-        # Perform vector search across tables
-        all_results = []
-        table_results = {}
-        
-        for table_name in tables:
+        for table_name in other_tables:
             table_start_time = time.time()
             
             try:
-                # Use RPC function for vector search
                 response = supabase.rpc(
                     'match_documents',
                     {
@@ -204,57 +233,75 @@ def perform_vector_search(supabase, query_embedding, query_text: str,
                     }
                 ).execute()
                 
-                table_results[table_name] = {
+                table_stats[table_name] = {
                     "count": len(response.data or []),
                     "time": time.time() - table_start_time
                 }
                 
                 if response.data:
-                    # Add table information to each result
                     for item in response.data:
-                        # Handle different table formats
                         if "id" not in item or "content" not in item or "similarity" not in item:
                             continue
                             
-                        # Retrieve additional information for certain tables
+                        # Get the charity_id for this record if applicable
                         additional_info = {}
+                        related_charity = None
                         
-                        # For charity results, get the charity name
-                        if table_name == "charities" and "id" in item:
+                        if table_name != "causes":
                             try:
-                                charity_info = supabase.table("charities").select("name").eq("charity_id", item["id"]).execute()
-                                if charity_info.data:
-                                    additional_info["charity_name"] = charity_info.data[0]["name"]
+                                # Different tables have different ID column names
+                                id_column = table_name.replace("charity_", "") + "_id"
+                                if table_name == "charity_causes":
+                                    id_column = "charity_id"  # Special case
+                                
+                                # Get charity_id based on table structure
+                                charity_id = None
+                                
+                                if table_name == "charity_causes":
+                                    charity_id = item["id"]  # It's already the charity_id
+                                else:
+                                    record_info = supabase.table(table_name).select("charity_id").eq(id_column, item["id"]).execute()
+                                    if record_info.data and len(record_info.data) > 0:
+                                        charity_id = record_info.data[0]["charity_id"]
+                                
+                                # Get charity info
+                                if charity_id:
+                                    charity_info = supabase.table("charities").select("name").eq("charity_id", charity_id).execute()
+                                    if charity_info.data and len(charity_info.data) > 0:
+                                        additional_info["charity_name"] = charity_info.data[0]["name"]
+                                        additional_info["charity_id"] = charity_id
+                                        
                             except Exception as e:
                                 if debug_mode:
-                                    st.warning(f"Error getting charity name: {str(e)}")
+                                    st.warning(f"Error getting related charity: {str(e)}")
                         
-                        # Add to results
-                        all_results.append({
+                        other_results.append({
                             'table': table_name,
                             'score': item['similarity'],
                             'content': item['content'],
                             'id': item['id'],
                             'additional_info': additional_info
                         })
-            except Exception as table_error:
+            except Exception as e:
                 if debug_mode:
-                    st.warning(f"Error searching {table_name}: {str(table_error)}")
-                table_results[table_name] = {
-                    "error": str(table_error),
+                    st.warning(f"Error searching {table_name}: {str(e)}")
+                table_stats[table_name] = {
+                    "error": str(e),
                     "time": time.time() - table_start_time
                 }
-                continue
         
-        # Sort by similarity score
+        # Combine results, ensuring charity results come first
+        all_results = charity_results + other_results
+        
+        # Sort by similarity score (but keep all charities)
         all_results.sort(key=lambda x: x['score'], reverse=True)
         
-        # Log results if in debug mode
+        # Log stats if in debug mode
         if debug_mode:
-            st.write(f"Found {len(all_results)} relevant results across {len(tables)} tables")
-            st.write("Table search results:", table_results)
-            
-        return all_results[:top_k]
+            st.write(f"Found {len(charity_results)} charities and {len(other_results)} other results")
+            st.write("Table search stats:", table_stats)
+        
+        return all_results[:max(top_k, len(charity_results))]
         
     except Exception as e:
         st.error(f"Vector search error: {str(e)}")
@@ -264,38 +311,111 @@ def perform_vector_search(supabase, query_embedding, query_text: str,
 
 
 def format_results_for_rag(results: List[Dict], query: str) -> str:
-    """Format search results into context for RAG"""
+    """Format search results into context for RAG, organizing by charity"""
     if not results:
         return "No relevant information found in the database for this query."
     
+    # Group results by charity
+    charity_data = {}
+    other_results = []
+    
+    # First pass - collect all charity information
+    for result in results:
+        if result['table'] == "charities":
+            charity_id = result['id']
+            charity_name = result['additional_info'].get('charity_name', 'Unknown Charity')
+            
+            if charity_id not in charity_data:
+                charity_data[charity_id] = {
+                    'name': charity_name,
+                    'description': result['content'],
+                    'highlights': [],
+                    'impact': [],
+                    'news': [],
+                    'financials': [],
+                    'causes': [],
+                    'people': [],
+                    'social': []
+                }
+    
+    # Second pass - add related information to charities
+    for result in results:
+        if result['table'] == "charities":
+            continue  # Already processed
+            
+        charity_id = result['additional_info'].get('charity_id')
+        
+        # If we can link this to a charity
+        if charity_id and charity_id in charity_data:
+            if result['table'] == "charity_highlights":
+                charity_data[charity_id]['highlights'].append(result['content'])
+            elif result['table'] == "charity_impact_areas":
+                charity_data[charity_id]['impact'].append(result['content'])
+            elif result['table'] == "charity_news":
+                charity_data[charity_id]['news'].append(result['content'])
+            elif result['table'] == "charity_financials":
+                charity_data[charity_id]['financials'].append(result['content'])
+            elif result['table'] == "charity_causes":
+                charity_data[charity_id]['causes'].append(result['content'])
+            elif result['table'] == "charity_people":
+                charity_data[charity_id]['people'].append(result['content'])
+            elif result['table'] == "charity_social_media":
+                charity_data[charity_id]['social'].append(result['content'])
+        else:
+            # Information not linked to a specific charity
+            other_results.append(result)
+    
+    # Format the context
     formatted_context = "RETRIEVED INFORMATION:\n\n"
     
-    for i, result in enumerate(results):
+    # First, add organized charity information
+    for charity_id, data in charity_data.items():
+        formatted_context += f"CHARITY [{data['name']}]: {data['description']}\n"
+        
+        if data['highlights']:
+            formatted_context += "  HIGHLIGHTS:\n"
+            for highlight in data['highlights']:
+                formatted_context += f"   - {highlight}\n"
+                
+        if data['impact']:
+            formatted_context += "  IMPACT AREAS:\n"
+            for impact in data['impact']:
+                formatted_context += f"   - {impact}\n"
+                
+        if data['news']:
+            formatted_context += "  NEWS:\n"
+            for news in data['news']:
+                formatted_context += f"   - {news}\n"
+                
+        if data['financials']:
+            formatted_context += "  FINANCIALS:\n"
+            for financial in data['financials']:
+                formatted_context += f"   - {financial}\n"
+                
+        if data['causes']:
+            formatted_context += "  CAUSES:\n"
+            for cause in data['causes']:
+                formatted_context += f"   - {cause}\n"
+                
+        if data['people']:
+            formatted_context += "  PEOPLE:\n"
+            for person in data['people']:
+                formatted_context += f"   - {person}\n"
+                
+        if data['social']:
+            formatted_context += "  SOCIAL MEDIA:\n"
+            for social in data['social']:
+                formatted_context += f"   - {social}\n"
+                
+        formatted_context += "\n"
+    
+    # Then add any other results
+    for result in other_results:
         table = result['table']
         content = result['content']
-        score = result['score']
-        additional_info = result.get('additional_info', {})
         
-        # Format differently based on table type
-        if table == "charities":
-            charity_name = additional_info.get("charity_name", "Unknown Charity")
-            formatted_context += f"CHARITY [{charity_name}]: {content}\n\n"
-        elif table == "charity_highlights":
-            formatted_context += f"HIGHLIGHT: {content}\n\n"
-        elif table == "charity_impact_areas":
-            formatted_context += f"IMPACT: {content}\n\n"
-        elif table == "charity_news":
-            formatted_context += f"NEWS: {content}\n\n"
-        elif table == "charity_financials":
-            formatted_context += f"FINANCIAL: {content}\n\n"
-        elif table == "charity_causes":
-            formatted_context += f"CAUSE RELATIONSHIP: {content}\n\n"
-        elif table == "charity_people":
-            formatted_context += f"PERSON: {content}\n\n"
-        elif table == "causes":
+        if table == "causes":
             formatted_context += f"CAUSE: {content}\n\n"
-        elif table == "charity_social_media":
-            formatted_context += f"SOCIAL MEDIA: {content}\n\n"
         else:
             formatted_context += f"[{table.upper()}]: {content}\n\n"
     
