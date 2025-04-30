@@ -6,14 +6,15 @@ from concurrent.futures import ThreadPoolExecutor
 import asyncio
 import traceback
 
-# Import utility functions
+# Import utility functions and config
+from config import get_config
 from rag_utils import initialize_gemini_api, generate_embedding
 
 def show_embedding_generator():
     """
-    Shows the embedding generator interface
+    Shows the embedding generator interface adapted for CharityFinder
     """
-    st.title("Database Embeddings Generator")
+    st.title("CharityFinder Embeddings Generator")
     
     # Check if API keys and client are set up
     if not st.session_state.get("gemini_api_key") or not st.session_state.get("supabase_client"):
@@ -26,51 +27,11 @@ def show_embedding_generator():
         st.error("Failed to initialize embedding model. Please check your API key.")
         return
     
-    # Define tables and their configurations
+    # Define tables and their configurations - simplified for CharityFinder
     TABLE_CONFIGS = {
         "charities": {
-            "id_column": "charity_id",
-            "text_column": "description", 
-            "embedding_column": "embedding"
-        },
-        "charity_news": {
-            "id_column": "news_id",
-            "text_column": "content",
-            "embedding_column": "embedding"
-        },
-        "charity_people": {
-            "id_column": "person_id",
-            "text_column": "name",
-            "embedding_column": "embedding"
-        },
-        "charity_impact_areas": {
-            "id_column": "impact_id",
-            "text_column": "impact_description",
-            "embedding_column": "embedding"
-        },
-        "charity_highlights": {
-            "id_column": "highlight_id",
-            "text_column": "highlight_text",
-            "embedding_column": "embedding"
-        },
-        "charity_financials": {
-            "id_column": "financial_id",
-            "text_column": "other_financial_metrics",
-            "embedding_column": "embedding"
-        },
-        "charity_causes": {
-            "id_column": "charity_id",
-            "text_column": None,  # Special case, will be handled differently
-            "embedding_column": "embedding"
-        },
-        "charity_social_media": {
-            "id_column": "social_id",
-            "text_column": "platform",
-            "embedding_column": "embedding"
-        },
-        "causes": {
-            "id_column": "cause_id",
-            "text_column": "description",
+            "id_column": "id",
+            "text_column": "activities", # Using activities as the main text field for embeddings
             "embedding_column": "embedding"
         }
     }
@@ -152,11 +113,8 @@ def process_tables(tables, table_configs, batch_size, progress_bar, logs_placeho
         
         log_message(f"Processing table: {table_name}", logs_placeholder)
         
-        # Special handling for charity_causes table
-        if table_name == "charity_causes":
-            process_charity_causes_table(table_name, config, batch_size, logs_placeholder)
-        else:
-            process_regular_table(table_name, config, batch_size, logs_placeholder)
+        # Process the table
+        process_table(table_name, config, batch_size, logs_placeholder)
             
         # Update statistics
         update_table_statistics(table_configs, stats_placeholder)
@@ -166,8 +124,8 @@ def process_tables(tables, table_configs, batch_size, progress_bar, logs_placeho
     log_message("Embedding generation completed!", logs_placeholder)
 
 
-def process_regular_table(table_name, config, batch_size, logs_placeholder):
-    """Process a regular table to generate embeddings"""
+def process_table(table_name, config, batch_size, logs_placeholder):
+    """Process a table to generate embeddings"""
     try:
         supabase = st.session_state.supabase_client
         embedding_model = initialize_gemini_api()
@@ -189,7 +147,6 @@ def process_regular_table(table_name, config, batch_size, logs_placeholder):
         missing_records = []
         try:
             # Some databases might not distinguish between NULL and missing columns
-            # This might fail if the column doesn't exist or if the SQL query syntax is different
             response = supabase.table(table_name).select(f"{id_column}, {text_column}").not_.is_(embedding_column, "null").eq(embedding_column, "").execute()
             missing_records = response.data
             log_message(f"Found {len(missing_records)} records with missing embeddings in {table_name}", logs_placeholder)
@@ -225,7 +182,7 @@ def process_regular_table(table_name, config, batch_size, logs_placeholder):
                     
                 # Generate embedding
                 try:
-                    embedding = generate_embedding(text, embedding_model)
+                    embedding = generate_embedding(text, embedding_model, "retrieval_document")
                     
                     if embedding:
                         # Update record with embedding
@@ -255,92 +212,6 @@ def process_regular_table(table_name, config, batch_size, logs_placeholder):
             
     except Exception as e:
         log_message(f"Error processing table {table_name}: {str(e)}", logs_placeholder)
-        if st.session_state.get("debug_mode", False):
-            log_message(traceback.format_exc(), logs_placeholder)
-
-
-def process_charity_causes_table(table_name, config, batch_size, logs_placeholder):
-    """Special handling for charity_causes table which needs joined data"""
-    try:
-        supabase = st.session_state.supabase_client
-        embedding_model = initialize_gemini_api()
-        
-        # Get column configuration
-        id_column = config["id_column"]  # This is charity_id
-        embedding_column = config["embedding_column"]
-        
-        # Fetch records with NULL embeddings
-        log_message(f"Fetching records with NULL embeddings from {table_name}", logs_placeholder)
-        
-        # We need to join with charities and causes tables
-        sql_query = f"""
-        SELECT 
-            cc.{id_column}, 
-            cc.cause_id,
-            c.name as charity_name,
-            cs.name as cause_name
-        FROM 
-            {table_name} cc
-        JOIN 
-            charities c ON cc.charity_id = c.charity_id
-        JOIN 
-            causes cs ON cc.cause_id = cs.cause_id
-        WHERE 
-            cc.{embedding_column} IS NULL
-        """
-        
-        response = supabase.query(sql_query).execute()
-        records_to_process = response.data
-        
-        log_message(f"Found {len(records_to_process)} records with NULL embeddings in {table_name}", logs_placeholder)
-        
-        if not records_to_process:
-            log_message(f"No records found with missing embeddings in {table_name}", logs_placeholder)
-            return
-        
-        # Process records in batches
-        total_batches = (len(records_to_process) + batch_size - 1) // batch_size
-        
-        for batch_index in range(total_batches):
-            start_idx = batch_index * batch_size
-            end_idx = min(start_idx + batch_size, len(records_to_process))
-            batch = records_to_process[start_idx:end_idx]
-            
-            log_message(f"Processing batch {batch_index + 1}/{total_batches} ({len(batch)} records)", logs_placeholder)
-            
-            for record in batch:
-                charity_id = record[id_column]
-                cause_id = record["cause_id"]
-                charity_name = record.get("charity_name", "Unknown Charity")
-                cause_name = record.get("cause_name", "Unknown Cause")
-                
-                # Create text for embedding
-                text = f'Charity "{charity_name}" supports cause "{cause_name}"'
-                
-                # Generate embedding
-                try:
-                    embedding = generate_embedding(text, embedding_model)
-                    
-                    if embedding:
-                        # Update record with embedding
-                        try:
-                            # For charity_causes we need a compound WHERE clause
-                            response = supabase.table(table_name).update(
-                                {embedding_column: embedding}
-                            ).eq(id_column, charity_id).eq("cause_id", cause_id).execute()
-                            
-                        except Exception as update_error:
-                            log_message(f"Error updating embedding for {table_name}: {str(update_error)}", logs_placeholder)
-                            
-                except Exception as e:
-                    log_message(f"Error generating embedding for {table_name} record {charity_id}-{cause_id}: {str(e)}", logs_placeholder)
-                    time.sleep(1)  # Add delay to avoid rate limits
-            
-            # Add a small delay between batches
-            time.sleep(0.5)
-            
-    except Exception as e:
-        log_message(f"Error processing charity_causes table: {str(e)}", logs_placeholder)
         if st.session_state.get("debug_mode", False):
             log_message(traceback.format_exc(), logs_placeholder)
 

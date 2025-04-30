@@ -4,27 +4,47 @@ import time
 from typing import List, Dict, Any
 import pandas as pd
 import traceback
+from config import get_config
 
 def initialize_gemini_api():
     """Initialize the Gemini API client"""
     try:
-        # Try to get API key from Streamlit secrets
-        try:
-            api_key = st.secrets["GEMINI_API_KEY"]
-        except:
-            # If not in secrets, get from session state
-            api_key = st.session_state.gemini_api_key
+        # Get API key from session state or config
+        api_key = st.session_state.get("gemini_api_key")
+        
+        # If not in session state, try from config
+        if not api_key:
+            config = get_config()
+            api_key = config["gemini_api_key"]
+            if api_key:
+                st.session_state.gemini_api_key = api_key
+        
+        if not api_key:
+            st.warning("Gemini API key not found. Please configure it in settings.")
+            return None
             
         genai.configure(api_key=api_key)
         embedding_model = "models/embedding-001"
         return embedding_model
     except Exception as e:
         error_msg = f"Failed to initialize Gemini API: {str(e)}"
-        st.error(error_msg)
+        if st.session_state.get("debug_mode", False):
+            st.error(error_msg)
         return None
 
-def generate_embedding(text: str, model: str):
-    """Generate embedding using Gemini API"""
+def generate_embedding(text: str, model: str, task_type: str = "retrieval_query"):
+    """
+    Generate embedding using Gemini API
+    
+    Args:
+        text: Text to embed
+        model: Embedding model to use
+        task_type: Either "retrieval_query" (for user queries) or 
+                  "retrieval_document" (for database documents)
+    
+    Returns:
+        List of floats representing the embedding vector
+    """
     try:
         if not text or text.strip() == "":
             return None
@@ -32,7 +52,7 @@ def generate_embedding(text: str, model: str):
         embedding = genai.embed_content(
             model=model,
             content=text,
-            task_type="retrieval_query" # Use retrieval_query for queries, retrieval_document for documents
+            task_type=task_type
         )
         
         # Return the embedding values as a list
@@ -40,13 +60,14 @@ def generate_embedding(text: str, model: str):
         return vector
     except Exception as e:
         error_msg = f"Error generating embedding: {str(e)}"
-        st.error(error_msg)
+        if st.session_state.get("debug_mode", False):
+            st.error(error_msg)
         time.sleep(1)  # Add a small delay in case of rate limiting
         return None
 
 def vector_search(supabase, query_text: str, top_k: int = 5, threshold: float = 0.7):
     """
-    Improved vector search function that properly handles joining between tables
+    Perform vector search in the CharityFinder database
     
     Args:
         supabase: Supabase client instance
@@ -55,7 +76,7 @@ def vector_search(supabase, query_text: str, top_k: int = 5, threshold: float = 
         threshold: Similarity threshold
         
     Returns:
-        List of search results with table, similarity score, and content
+        List of search results with similarity score, and content
     """
     try:
         # Generate embedding for the query
@@ -66,21 +87,11 @@ def vector_search(supabase, query_text: str, top_k: int = 5, threshold: float = 
             st.warning("Could not generate embedding for the query")
             return []
         
-        # Tables to search
-        tables = [
-            "charities",
-            "charity_news",
-            "charity_people",
-            "charity_impact_areas",
-            "charity_highlights",
-            "charity_financials",
-            "charity_causes",
-            "charity_social_media",
-            "causes"
-        ]
+        # Tables to search (only charities in this version)
+        tables = ["charities"]
         
         # For debugging
-        if st.session_state.debug_mode:
+        if st.session_state.get("debug_mode", False):
             st.write(f"Generated embedding with {len(query_embedding)} dimensions")
             st.write(f"Searching {len(tables)} tables with threshold {threshold}")
         
@@ -100,7 +111,7 @@ def vector_search(supabase, query_text: str, top_k: int = 5, threshold: float = 
                     }
                 ).execute()
                 
-                if st.session_state.debug_mode:
+                if st.session_state.get("debug_mode", False):
                     st.write(f"Search results for {table_name}: {len(response.data or [])}")
                 
                 if response.data:
@@ -109,56 +120,31 @@ def vector_search(supabase, query_text: str, top_k: int = 5, threshold: float = 
                         # Handle different table formats
                         if "id" not in item or "content" not in item or "similarity" not in item:
                             continue
-                            
-                        # Retrieve additional information for certain tables
-                        additional_info = {}
                         
-                        # IMPROVED: Special handling for charity_highlights table
-                        if table_name == "charity_highlights":
-                            try:
-                                # Get the charity_id from the highlight
-                                highlight_id = item["id"]
-                                highlight_info = supabase.table("charity_highlights").select("charity_id").eq("highlight_id", highlight_id).execute()
-                                
-                                if highlight_info.data and len(highlight_info.data) > 0:
-                                    charity_id = highlight_info.data[0]["charity_id"]
-                                    
-                                    # Get the charity details
-                                    charity_info = supabase.table("charities").select("charity_id,name,description").eq("charity_id", charity_id).execute()
-                                    
-                                    if charity_info.data and len(charity_info.data) > 0:
-                                        # Include full charity information
-                                        additional_info["charity_id"] = charity_id
-                                        additional_info["charity_name"] = charity_info.data[0]["name"]
-                                        additional_info["charity_description"] = charity_info.data[0]["description"]
-                                        
-                                        # This is important: we modify the content to include charity info
-                                        item["content"] = f"Charity '{charity_info.data[0]['name']}' is a {item['content']}"
-                            except Exception as e:
-                                if st.session_state.debug_mode:
-                                    st.warning(f"Error enriching highlight data: {str(e)}")
-                        
-                        # Regular handling for charities table
-                        elif table_name == "charities" and "id" in item:
-                            try:
-                                charity_id = item["id"]
-                                charity_info = supabase.table("charities").select("name").eq("charity_id", charity_id).execute()
-                                if charity_info.data:
-                                    additional_info["charity_name"] = charity_info.data[0]["name"]
-                                    additional_info["charity_id"] = charity_id
-                            except Exception as e:
-                                if st.session_state.debug_mode:
-                                    st.warning(f"Error getting charity name: {str(e)}")
-                        
-                        all_results.append({
+                        # Create result record
+                        result = {
                             'table': table_name,
                             'score': item['similarity'],
                             'content': item['content'],
                             'id': item['id'],
-                            'additional_info': additional_info
-                        })
+                            'additional_info': {}
+                        }
+                        
+                        # Retrieve charity name as additional information
+                        try:
+                            charity_info = supabase.table("charities").select("name, type, sector, classification").eq("id", item["id"]).execute()
+                            if charity_info.data and len(charity_info.data) > 0:
+                                result['additional_info']['name'] = charity_info.data[0].get("name", "Unknown")
+                                result['additional_info']['type'] = charity_info.data[0].get("type", "Unknown")
+                                result['additional_info']['sector'] = charity_info.data[0].get("sector", "Unknown")
+                                result['additional_info']['classification'] = charity_info.data[0].get("classification", "Unknown")
+                        except Exception as e:
+                            if st.session_state.get("debug_mode", False):
+                                st.warning(f"Error retrieving additional info: {str(e)}")
+                        
+                        all_results.append(result)
             except Exception as table_error:
-                if st.session_state.debug_mode:
+                if st.session_state.get("debug_mode", False):
                     st.warning(f"Error searching {table_name}: {str(table_error)}")
                 continue
         
@@ -166,28 +152,19 @@ def vector_search(supabase, query_text: str, top_k: int = 5, threshold: float = 
         all_results.sort(key=lambda x: x['score'], reverse=True)
         
         # Log results if in debug mode
-        if st.session_state.debug_mode:
-            st.write(f"Found {len(all_results)} relevant results across {len(tables)} tables")
+        if st.session_state.get("debug_mode", False):
+            st.write(f"Found {len(all_results)} relevant results")
             
         return all_results[:top_k]
         
     except Exception as e:
-        if st.session_state.debug_mode:
+        if st.session_state.get("debug_mode", False):
             st.error(f"Vector search error: {str(e)}")
             st.error(traceback.format_exc())
         return []
 
 def format_results_for_rag(results: List[Dict], query: str) -> str:
-    """
-    Enhanced formatter that provides better display of joined charity highlight information
-    
-    Args:
-        results: List of search results with enriched data
-        query: Original user query
-        
-    Returns:
-        Formatted context string for the RAG prompt
-    """
+    """Format search results into context for RAG"""
     if not results:
         return "No relevant information found in the database for this query."
     
@@ -197,60 +174,26 @@ def format_results_for_rag(results: List[Dict], query: str) -> str:
     displayed_charities = set()
     
     for i, result in enumerate(results):
-        table = result['table']
+        charity_id = result['id']
+        name = result['additional_info'].get('name', 'Unknown Charity')
+        charity_type = result['additional_info'].get('type', 'Unknown Type')
+        sector = result['additional_info'].get('sector', 'Unknown Sector')
+        classification = result['additional_info'].get('classification', 'Unknown Classification')
         content = result['content']
         score = result['score']
-        additional_info = result.get('additional_info', {})
         
-        # Format differently based on table type
-        if table == "charities":
-            charity_name = additional_info.get("charity_name", "Unknown Charity")
-            charity_id = additional_info.get("charity_id")
+        # Skip duplicates
+        if charity_id in displayed_charities:
+            continue
             
-            if charity_id and charity_id in displayed_charities:
-                # Skip if we've already shown this charity
-                continue
-                
-            if charity_id:
-                displayed_charities.add(charity_id)
-                
-            formatted_context += f"CHARITY [{charity_name}]: {content}\n\n"
-            
-        elif table == "charity_highlights":
-            # Enhanced highlight display with charity information
-            charity_name = additional_info.get("charity_name")
-            charity_description = additional_info.get("charity_description")
-            charity_id = additional_info.get("charity_id")
-            
-            if charity_id:
-                # Only add the charity ID to the displayed set if we have full info
-                if charity_id in displayed_charities:
-                    formatted_context += f"HIGHLIGHT: {content}\n\n"
-                else:
-                    displayed_charities.add(charity_id)
-                    # Include full charity information with the highlight
-                    formatted_context += f"CHARITY [{charity_name}]: {charity_description}\n"
-                    formatted_context += f"HIGHLIGHT: {content}\n\n"
-            else:
-                # Simple highlight without charity information
-                formatted_context += f"HIGHLIGHT: {content}\n\n"
-                
-        elif table == "charity_impact_areas":
-            formatted_context += f"IMPACT: {content}\n\n"
-        elif table == "charity_news":
-            formatted_context += f"NEWS: {content}\n\n"
-        elif table == "charity_financials":
-            formatted_context += f"FINANCIAL: {content}\n\n"
-        elif table == "charity_causes":
-            formatted_context += f"CAUSE RELATIONSHIP: {content}\n\n"
-        elif table == "charity_people":
-            formatted_context += f"PERSON: {content}\n\n"
-        elif table == "causes":
-            formatted_context += f"CAUSE: {content}\n\n"
-        elif table == "charity_social_media":
-            formatted_context += f"SOCIAL MEDIA: {content}\n\n"
-        else:
-            formatted_context += f"[{table.upper()}]: {content}\n\n"
+        displayed_charities.add(charity_id)
+        
+        # Format charity information
+        formatted_context += f"CHARITY: {name}\n"
+        formatted_context += f"TYPE: {charity_type}\n"
+        formatted_context += f"SECTOR: {sector}\n"
+        formatted_context += f"CLASSIFICATION: {classification}\n" 
+        formatted_context += f"ACTIVITIES: {content}\n\n"
     
     return formatted_context
 
