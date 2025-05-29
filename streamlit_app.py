@@ -477,9 +477,9 @@ def show_settings():
     # Supabase settings
     ##col1, col2 = st.columns(2)
     ##with col1:
-        supabase_url = st.text_input("Supabase URL", value=st.session_state.supabase_url, key="settings_supabase_url")
+        #supabase_url = st.text_input("Supabase URL", value=st.session_state.supabase_url, key="settings_supabase_url")
     ##with col2:
-        supabase_key = st.text_input("Supabase API Key", type="password", value=st.session_state.supabase_key, key="settings_supabase_key")
+        #supabase_key = st.text_input("Supabase API Key", type="password", value=st.session_state.supabase_key, key="settings_supabase_key")
     
     # Gemini API settings    
     ##gemini_api_key = st.text_input("Gemini API Key", type="password", value=st.session_state.gemini_api_key, key="settings_gemini_api_key")
