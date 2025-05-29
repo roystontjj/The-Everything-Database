@@ -469,6 +469,118 @@ def show_rag_chat_interface():
         """)
 
 # Settings Page
+def show_settings():
+    st.title("Settings")
+    
+    st.subheader("Database Connection")
+    
+    # Supabase settings
+    ##col1, col2 = st.columns(2)
+    ##with col1:
+        supabase_url = st.text_input("Supabase URL", value=st.session_state.supabase_url, key="settings_supabase_url")
+    ##with col2:
+        supabase_key = st.text_input("Supabase API Key", type="password", value=st.session_state.supabase_key, key="settings_supabase_key")
+    
+    # Gemini API settings    
+    ##gemini_api_key = st.text_input("Gemini API Key", type="password", value=st.session_state.gemini_api_key, key="settings_gemini_api_key")
+    
+    # Save settings button
+    if st.button("Save Settings"):
+        st.session_state.supabase_url = supabase_url
+        st.session_state.supabase_key = supabase_key
+        st.session_state.gemini_api_key = gemini_api_key
+        
+        # Update connections
+        try:
+            if supabase_url and supabase_key:
+                supabase = create_client(supabase_url, supabase_key)
+                st.session_state.supabase_client = supabase
+                st.success("Supabase settings updated successfully!")
+            
+            if gemini_api_key:
+                genai.configure(api_key=gemini_api_key)
+                model = genai.GenerativeModel('gemini-1.5-flash')
+                st.session_state.model = model
+                st.session_state.chat = model.start_chat(history=[])
+                st.success("Gemini API settings updated successfully!")
+        except Exception as e:
+            st.error(f"Error updating settings: {str(e)}")
+    
+    # Advanced Settings
+    st.subheader("Advanced Settings")
+    
+    with st.expander("RAG Settings"):
+        st.checkbox("Debug Mode", value=st.session_state.debug_mode, key="debug_mode_setting")
+        if st.button("Save Advanced Settings"):
+            st.session_state.debug_mode = st.session_state.get("debug_mode_setting", False)
+            st.success("Advanced settings saved!")
+    
+    # API Testing
+    st.subheader("API Testing")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Test Supabase Connection"):
+            if "supabase_client" in st.session_state:
+                test_connection()
+            else:
+                st.error("Please configure and save Supabase settings first.")
+    
+    with col2:
+        if st.button("Test Vector Search"):
+            if not st.session_state.get("supabase_client"):
+                st.error("Please configure Supabase connection first")
+            elif not st.session_state.get("gemini_api_key"):
+                st.error("Please configure Gemini API key first")
+            else:
+                try:
+                    # Test vector search with a simple query
+                    test_results = vector_search(
+                        st.session_state.supabase_client,
+                        "Show me information about charity work",
+                        top_k=3,
+                        threshold=0.6
+                    )
+                    
+                    if test_results:
+                        st.success(f"✅ Vector search successful! Found {len(test_results)} results.")
+                        st.json(test_results)
+                    else:
+                        st.warning("Vector search returned no results. This might be normal if your database is empty or has no embeddings yet.")
+                        
+                except Exception as e:
+                    st.error(f"Vector search test failed: {str(e)}")
+                    
+    # Test embedding generation
+    st.subheader("Test Embedding Generation")
+    
+    test_text = st.text_input("Enter text to generate embedding:", value="Test charity information")
+    if st.button("Generate Test Embedding"):
+        try:
+            if st.session_state.gemini_api_key:
+                genai.configure(api_key=st.session_state.gemini_api_key)
+                embedding_model = "models/embedding-001"
+                
+                # Generate the embedding
+                embedding = genai.embed_content(
+                    model=embedding_model,
+                    content=test_text,
+                    task_type="retrieval_document"
+                )
+                
+                # Get the dimensions
+                vector = embedding["embedding"]
+                dimensions = len(vector)
+                
+                st.success(f"✅ Generated embedding with {dimensions} dimensions")
+                st.write(f"First 5 values: {vector[:5]}")
+                
+                # Show dimensions info for database setup
+                st.info(f"Your vector columns should be of type vector({dimensions})")
+            else:
+                st.error("Please configure Gemini API key first")
+        except Exception as e:
+            st.error(f"Embedding generation failed: {str(e)}")
 
 
 # SQL Setup Helper
